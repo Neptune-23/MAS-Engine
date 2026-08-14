@@ -58,6 +58,8 @@ class TaskStateMachine:
         self._db_available = False
         self._db_error = None
 
+        # 在初始化时打印连接参数（密码脱敏）
+        _log(f"初始化数据库连接: host={self.host}, user={self.user}, database={self.database}")
         self._ensure_table()
 
     def _get_connection(self):
@@ -74,6 +76,7 @@ class TaskStateMachine:
         )
 
     def _ensure_table(self):
+        _log("_ensure_table 被调用")
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -90,7 +93,7 @@ class TaskStateMachine:
             conn.close()
             self._db_available = True
             self._db_error = None
-            _log("数据库连接成功，表已就绪")
+            _log("数据库连接成功，表已就绪，_db_available 设为 True")
         except Exception as e:
             self._db_available = False
             self._db_error = str(e)
@@ -98,6 +101,7 @@ class TaskStateMachine:
 
     def _get_from_db(self, task_id: str):
         if not self._db_available:
+            _log(f"_get_from_db: _db_available=False，跳过查询")
             return None
         try:
             conn = self._get_connection()
@@ -115,7 +119,10 @@ class TaskStateMachine:
                         context = json.loads(row[1])
                     except json.JSONDecodeError:
                         context = {}
+                _log(f"_get_from_db: 找到 task_id={task_id}, state={row[0]}")
                 return {"current_state": row[0], "context": context}
+            else:
+                _log(f"_get_from_db: 未找到 task_id={task_id}")
             return None
         except Exception as e:
             _log(f"查询失败: {e}")
@@ -123,19 +130,23 @@ class TaskStateMachine:
             return None
 
     def _update_db(self, task_id: str, state: str, context: Dict[str, Any]):
+        _log(f"_update_db 被调用: task_id={task_id}, state={state}, _db_available={self._db_available}")
         if not self._db_available:
+            _log("_db_available=False，跳过写入")
             return False
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
+            sql = """INSERT INTO task_states (task_id, current_state, context)
+                     VALUES (%s, %s, %s)
+                     ON DUPLICATE KEY UPDATE
+                     current_state = VALUES(current_state),
+                     context = VALUES(context)"""
             cursor.execute(
-                """INSERT INTO task_states (task_id, current_state, context)
-                   VALUES (%s, %s, %s)
-                   ON DUPLICATE KEY UPDATE
-                   current_state = VALUES(current_state),
-                   context = VALUES(context)""",
+                sql,
                 (task_id, state, json.dumps(context, ensure_ascii=False))
             )
+            _log(f"SQL 执行成功，影响行数: {cursor.rowcount}")
             conn.close()
             return True
         except Exception as e:
@@ -144,9 +155,11 @@ class TaskStateMachine:
             return False
 
     def get_task_state(self, task_id: str):
+        _log(f"get_task_state 被调用: task_id={task_id}")
         if task_id in self._cache:
             cached = self._cache[task_id]
             if time.time() - cached["timestamp"] < self._cache_ttl:
+                _log(f"从缓存返回: state={cached['state']}")
                 return {"current_state": cached["state"], "context": cached.get("context", {})}
             else:
                 del self._cache[task_id]
@@ -164,12 +177,14 @@ class TaskStateMachine:
 
     def update_task_state(self, task_id: str, state: str, context: Optional[Dict[str, Any]] = None):
         context = context or {}
+        _log(f"update_task_state 被调用: task_id={task_id}, state={state}")
         success = self._update_db(task_id, state, context)
         self._cache[task_id] = {
             "state": state,
             "context": context,
             "timestamp": time.time()
         }
+        _log(f"update_task_state 完成, success={success}")
         return success
 
     def is_db_available(self) -> bool:

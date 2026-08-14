@@ -21,27 +21,24 @@ class AgentRole:
 ROLE_TOOL_REGISTRY = {
     AgentState.REQUIREMENT_EXTRACTION: {
         AgentRole.ANALYST: ["search_tools", "get_tool_details", "get_rules"],
-        "default": ["search_tools", "get_tool_details", "orchestrate_task", "get_next_message"]
+        "default": ["search_tools", "get_tool_details", "orchestrate_task", "get_next_message","infer_build_steps"]
     },
     AgentState.REQUIREMENT_ANALYSIS: {
-        AgentRole.ANALYST: ["search_tools", "get_tool_details", "get_rules", "list_templates"],
-        "default": ["search_tools", "get_tool_details", "orchestrate_task", "get_next_message"]
+        AgentRole.ANALYST: ["search_tools", "get_tool_details", "get_rules","infer_build_steps"],
+        "default": ["search_tools", "get_tool_details", "orchestrate_task", "get_next_message","analyze_project_structure","infer_build_steps"]
     },
     AgentState.RESOURCE_LOADING: {
-        AgentRole.ARCHITECT: ["search_tools", "get_tool_details", "list_templates"],
-        "default": ["search_tools", "get_tool_details", "list_templates", "orchestrate_task", "get_next_message"]
+        AgentRole.ARCHITECT: ["search_tools", "get_tool_details",],
+        "default": ["search_tools", "get_tool_details", "orchestrate_task", "get_next_message","infer_build_steps"]
     },
     AgentState.CODE_CONSTRUCTION: {
         AgentRole.DEVELOPER: [
             "search_tools",
             "get_tool_details",
-            "list_templates",
-            "create_frontend_project",
-            "create_backend_project",
-            "create_admin_project",
             "scan_code_batch",
             "orchestrate_task",
-            "get_next_message"
+            "get_next_message",
+            "analyze_project_structure"
         ],
         AgentRole.REVIEWER: [
             "search_tools",
@@ -50,9 +47,10 @@ ROLE_TOOL_REGISTRY = {
             "scan_backend_batch",
             "scan_admin_batch",
             "orchestrate_task",
-            "get_next_message"
+            "get_next_message",
+            "infer_build_steps"
         ],
-        "default": ["search_tools", "get_tool_details", "list_templates", "orchestrate_task", "get_next_message"]
+        "default": ["search_tools", "get_tool_details", "orchestrate_task", "get_next_message","infer_build_steps"]
     },
     AgentState.WEB_TESTING: {
         AgentRole.TESTER: [
@@ -62,9 +60,10 @@ ROLE_TOOL_REGISTRY = {
             "scan_code_batch",
             "get_pipeline_status",
             "orchestrate_task",
-            "get_next_message"
+            "get_next_message",
+            "infer_build_steps"
         ],
-        "default": ["search_tools", "get_tool_details", "run_web_audit", "orchestrate_task", "get_next_message"]
+        "default": ["search_tools", "get_tool_details", "run_web_audit", "orchestrate_task", "get_next_message","infer_build_steps"]
     },
     AgentState.SELF_HEALING: {
         AgentRole.FIXER: [
@@ -81,7 +80,8 @@ ROLE_TOOL_REGISTRY = {
             "get_pipeline_status",
             "run_web_audit",
             "orchestrate_task",
-            "get_next_message"
+            "get_next_message",
+            "infer_build_steps"
         ],
         AgentRole.REVIEWER: [
             "search_tools",
@@ -91,9 +91,10 @@ ROLE_TOOL_REGISTRY = {
             "scan_admin_batch",
             "get_pipeline_status",
             "orchestrate_task",
-            "get_next_message"
+            "get_next_message",
+            "infer_build_steps"
         ],
-        "default": ["search_tools", "get_tool_details", "scan_code_batch", "get_pipeline_status", "orchestrate_task", "get_next_message"]
+        "default": ["search_tools", "get_tool_details", "scan_code_batch", "get_pipeline_status", "orchestrate_task", "get_next_message","infer_build_steps"]
     },
     AgentState.DELIVERY_COMPLETED: {
         "default": []

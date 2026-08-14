@@ -1,4 +1,5 @@
 import sys
+sys.stdout = sys.stderr
 import os
 import shutil
 import subprocess
@@ -7,15 +8,25 @@ import uuid
 import time
 import logging
 import json
+from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 from datetime import datetime
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
-# 引入我们刚刚写的模块
 from state_machine import TaskStateMachine, AgentState
 from tool_dispatcher import DynamicToolDispatcher
 from tool_dispatcher import AgentRole  # 新增
 from functools import wraps
+from pathlib import Path
+from dotenv import load_dotenv
+
+# 加载 .env（根目录位于 mcp-server 的上一级）
+env_path = Path(__file__).parent.parent / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
+    sys.stderr.write(f"[Config] 已加载 .env 文件: {env_path}")
+else:
+    sys.stderr.write(f"[Config] 警告: .env 文件不存在，将使用系统环境变量")
 
 # Agent 间消息协议（内存队列）
 agent_message_queue = []
@@ -121,17 +132,179 @@ DB_CONFIG = {
 state_machine = TaskStateMachine(DB_CONFIG)
 
 # ---------- 工具 1: 列出所有可用的模板 ----------
+# @mcp.tool()
+# def list_templates() -> str:
+#     """列出当前工具箱里所有可用的项目模板（前端、后端、后台）"""
+#     if not TEMPLATES_DIR.exists():
+#         return "错误：模板目录不存在！"
+    
+#     templates = [d.name for d in TEMPLATES_DIR.iterdir() if d.is_dir()]
+#     if not templates:
+#         return "当前没有找到任何模板，请先将模板放入 assets/templates/ 下"
+    
+#     return "可用的模板列表：\n" + "\n".join([f"- {t}" for t in templates])
+
+# ---------- 工具: 通用项目指纹识别 ----------
 @mcp.tool()
-def list_templates() -> str:
-    """列出当前工具箱里所有可用的项目模板（前端、后端、后台）"""
-    if not TEMPLATES_DIR.exists():
-        return "错误：模板目录不存在！"
+def analyze_project_structure(project_path: str) -> str:
+    """
+    扫描项目根目录，识别技术栈指纹，返回结构化 JSON。
+    支持识别：Go (go.mod), Rust (Cargo.toml), Python (requirements.txt/pyproject.toml),
+    Node.js (package.json), PHP (composer.json), Java (pom.xml/build.gradle) 等。
     
-    templates = [d.name for d in TEMPLATES_DIR.iterdir() if d.is_dir()]
-    if not templates:
-        return "当前没有找到任何模板，请先将模板放入 assets/templates/ 下"
+    Args:
+        project_path: 项目的绝对路径
+    """
+    path = Path(project_path)
+    if not path.exists():
+        return json.dumps({"error": f"路径不存在: {project_path}"}, ensure_ascii=False)
+
+    # 指纹特征映射表（可扩展）
+    FINGERPRINT_RULES = {
+        "go.mod": {"language": "Go", "package_manager": "go mod", "build_tool": "go build"},
+        "Cargo.toml": {"language": "Rust", "package_manager": "cargo", "build_tool": "cargo build"},
+        "pom.xml": {"language": "Java", "package_manager": "maven", "build_tool": "mvn compile"},
+        "build.gradle": {"language": "Java", "package_manager": "gradle", "build_tool": "gradle build"},
+        "package.json": {"language": "Node.js", "package_manager": "npm", "build_tool": "npm run build"},
+        "composer.json": {"language": "PHP", "package_manager": "composer", "build_tool": "composer install"},
+        "requirements.txt": {"language": "Python", "package_manager": "pip", "build_tool": "pip install -r requirements.txt"},
+        "pyproject.toml": {"language": "Python", "package_manager": "poetry", "build_tool": "poetry install"},
+    }
+
+    fingerprint = {
+        "language": None,
+        "package_manager": None,
+        "build_tool": None,
+        "framework": None,
+        "config_files": [],
+        "entry_files": [],
+        "project_type": "unknown"
+    }
+
+    # 1. 检测指纹文件
+    for file, info in FINGERPRINT_RULES.items():
+        if (path / file).exists():
+            fingerprint["language"] = info["language"]
+            fingerprint["package_manager"] = info["package_manager"]
+            fingerprint["build_tool"] = info["build_tool"]
+            fingerprint["config_files"].append(file)
+
+    # 2. 检测入口文件
+    for entry in ["main.go", "main.rs", "src/main.rs", "index.js", "src/index.js", "app.py", "main.py", "index.php", "public/index.php"]:
+        if (path / entry).exists():
+            fingerprint["entry_files"].append(entry)
+
+    # 3. 推断项目类型（简化）
+    if fingerprint["language"] == "Node.js" and fingerprint["entry_files"]:
+        fingerprint["project_type"] = "web_app"
+    elif fingerprint["language"] == "Python" and "app.py" in fingerprint["entry_files"]:
+        fingerprint["project_type"] = "web_app"
+    elif fingerprint["language"] == "Go" and "main.go" in fingerprint["entry_files"]:
+        fingerprint["project_type"] = "cli_app"
+
+    # 4. 基础诊断
+    if not fingerprint["config_files"]:
+        fingerprint["error"] = "未识别到任何已知的项目指纹文件"
+
+    return json.dumps(fingerprint, indent=2, ensure_ascii=False)
+
+# ---------- 工具: 推理构建步骤 ----------
+@mcp.tool()
+def infer_build_steps(fingerprint_json: str) -> str:
+    """
+    根据项目指纹 JSON 推理构建、测试、启动命令序列。
     
-    return "可用的模板列表：\n" + "\n".join([f"- {t}" for t in templates])
+    Args:
+        fingerprint_json: analyze_project_structure 返回的 JSON 字符串
+    """
+    try:
+        fingerprint = json.loads(fingerprint_json)
+    except json.JSONDecodeError:
+        return json.dumps({"error": "无效的指纹 JSON"}, ensure_ascii=False)
+
+    if "error" in fingerprint:
+        return json.dumps({"error": fingerprint["error"]}, ensure_ascii=False)
+
+    language = fingerprint.get("language")
+    package_manager = fingerprint.get("package_manager")
+    build_tool = fingerprint.get("build_tool")
+    entry_files = fingerprint.get("entry_files", [])
+
+    # 构建步骤规则映射
+    build_steps = []
+    test_steps = []
+    run_steps = []
+
+    # 按语言和包管理器推理
+    if language == "Rust":
+        build_steps = ["cargo build"]
+        test_steps = ["cargo test"]
+        run_steps = ["cargo run"]
+    elif language == "Go":
+        build_steps = ["go build -o app"]
+        test_steps = ["go test ./..."]
+        # 尝试从入口文件推断运行命令
+        if any("main.go" in f for f in entry_files):
+            run_steps = ["./app"]
+        else:
+            run_steps = ["go run main.go"]
+    elif language == "Node.js":
+        # 检查是否有 package.json 中的 scripts
+        build_steps = ["npm install", "npm run build"]
+        test_steps = ["npm test"]
+        run_steps = ["npm start"]
+    elif language == "Python":
+        if package_manager == "poetry":
+            build_steps = ["poetry install"]
+            test_steps = ["poetry run pytest"]
+            run_steps = ["poetry run python main.py" if "main.py" in entry_files else "poetry run python app.py"]
+        elif package_manager == "pip":
+            build_steps = ["pip install -r requirements.txt"]
+            test_steps = ["pytest"]
+            run_steps = ["python main.py" if "main.py" in entry_files else "python app.py"]
+        else:
+            build_steps = ["pip install -r requirements.txt"]
+            test_steps = ["pytest"]
+            run_steps = ["python main.py" if "main.py" in entry_files else "python app.py"]
+    elif language == "PHP":
+        build_steps = ["composer install"]
+        test_steps = ["composer test"]  # 如果有 phpunit 配置可检测
+        run_steps = ["php -S localhost:8000 -t public"]
+    elif language == "Java":
+        if package_manager == "maven":
+            build_steps = ["mvn compile"]
+            test_steps = ["mvn test"]
+            run_steps = ["mvn exec:java -Dexec.mainClass=Main"]
+        elif package_manager == "gradle":
+            build_steps = ["gradle build"]
+            test_steps = ["gradle test"]
+            run_steps = ["gradle run"]
+        else:
+            build_steps = ["javac Main.java"]
+            test_steps = ["未检测到测试配置"]
+            run_steps = ["java Main"]
+    else:
+        # 未识别的语言
+        return json.dumps({
+            "error": f"未识别的语言: {language}",
+            "suggestion": "请检查项目指纹是否正确"
+        }, ensure_ascii=False)
+
+    # 如果没配置运行步骤，使用默认占位
+    if not run_steps:
+        run_steps = ["未检测到运行命令"]
+
+    # 构建输出摘要
+    result = {
+        "language": language,
+        "package_manager": package_manager,
+        "build_steps": build_steps,
+        "test_steps": test_steps,
+        "run_steps": run_steps,
+        "estimated_time": "约 30 秒" if len(build_steps) > 1 else "约 10 秒"
+    }
+
+    return json.dumps(result, indent=2, ensure_ascii=False)
 
 # ---------- 测试类：Web 自动化测试闭环 (Playwright 引擎) ----------
 @mcp.tool()
@@ -242,6 +415,16 @@ def search_tools(task_id: str, query: str = "", category: str = "", role: str = 
             "description": "任务编排入口：接收自然语言任务描述，自动设置状态和角色",
             "roles": ["developer", "reviewer", "tester", "analyst", "architect", "fixer"]
         },
+        "analyze_project_structure": {
+        "category": "project",
+        "description": "扫描项目根目录，识别技术栈指纹，返回语言、包管理器和构建工具信息",
+        "roles": ["developer", "reviewer", "tester", "analyst", "architect"]
+        },
+        "infer_build_steps": {
+        "category": "project",
+        "description": "根据项目指纹 JSON 推理构建、测试、启动命令序列",
+        "roles": ["developer", "reviewer", "tester", "analyst", "architect"]
+        },
          "get_next_message": {
             "category": "meta",
             "description": "获取发给当前角色的下一条消息（Agent 间通信）",
@@ -264,11 +447,11 @@ def search_tools(task_id: str, query: str = "", category: str = "", role: str = 
             "description": "获取指定工具的完整定义（参数、返回格式、示例）",
             "roles": ["developer", "reviewer", "tester", "analyst", "architect", "fixer"]
         },
-        "list_templates": {
-            "category": "template", 
-            "description": "列出所有可用的项目模板",
-            "roles": ["developer", "reviewer", "tester", "architect"]
-        },
+        # "list_templates": {
+        #     "category": "template", 
+        #     "description": "列出所有可用的项目模板",
+        #     "roles": ["developer", "reviewer", "tester", "architect"]
+        # },
         "get_rules": {
             "category": "project",
             "description": "获取公司开发红线规则",
@@ -280,21 +463,21 @@ def search_tools(task_id: str, query: str = "", category: str = "", role: str = 
             "roles": ["developer", "reviewer", "tester", "fixer"]
         },
         # ---------- 创建类 ----------
-        "create_frontend_project": {
-            "category": "template",
-            "description": "基于 Vue 3 + uni-app 模板创建新前端项目",
-            "roles": ["developer"]
-        },
-        "create_backend_project": {
-            "category": "template",
-            "description": "基于 ThinkPHP 模板创建新后端项目",
-            "roles": ["developer"]
-        },
-        "create_admin_project": {
-            "category": "template",
-            "description": "基于 FastAdmin 模板创建新后台项目",
-            "roles": ["developer"]
-        },
+        # "create_frontend_project": {
+        #     "category": "template",
+        #     "description": "基于 Vue 3 + uni-app 模板创建新前端项目",
+        #     "roles": ["developer"]
+        # },
+        # "create_backend_project": {
+        #     "category": "template",
+        #     "description": "基于 ThinkPHP 模板创建新后端项目",
+        #     "roles": ["developer"]
+        # },
+        # "create_admin_project": {
+        #     "category": "template",
+        #     "description": "基于 FastAdmin 模板创建新后台项目",
+        #     "roles": ["developer"]
+        # },
         # ---------- 扫描类 ----------
         "scan_code_batch": {
             "category": "quality",
@@ -580,76 +763,126 @@ def get_tool_details(tool_name: str) -> str:
         result += f"💡 示例：{schema['example']}\n"
     return result
 
-# ---------- 工具 2: 创建前端 Vue 项目（核心功能） ----------
-@mcp.tool()
-def create_frontend_project(target_path: str, project_name: str) -> str:
-    """
-    基于公司标准的 Vue 3 + JS 前端模板，创建一个新的前端项目。
+# ---------- 工具 2: 创建前端 Vue 项目 ----------
+# @mcp.tool()
+# def create_frontend_project(target_path: str, project_name: str) -> str:
+#     """
+#     基于公司标准的 Vue 3 + JS 前端模板，创建一个新的前端项目。
     
-    Args:
-        target_path: 要把项目创建在哪里（例如 D:/workspace）
-        project_name: 新项目的文件夹名称（例如 my-admin-ui）
-    """
-    source_template = TEMPLATES_DIR / "frontend-boilerplate"
+#     Args:
+#         target_path: 要把项目创建在哪里（例如 D:/workspace）
+#         project_name: 新项目的文件夹名称（例如 my-admin-ui）
+#     """
+#     source_template = TEMPLATES_DIR / "frontend-boilerplate"
     
-    # 1. 检查源模板是否存在
-    if not source_template.exists():
-        return f"错误：找不到前端模板，请确认 assets/templates/frontend-boilerplate 存在"
+#     # 1. 检查源模板是否存在
+#     if not source_template.exists():
+#         return f"错误：找不到前端模板，请确认 assets/templates/frontend-boilerplate 存在"
     
-    # 2. 拼接目标完整路径
-    target_full_path = Path(target_path) / project_name
+#     # 2. 拼接目标完整路径
+#     target_full_path = Path(target_path) / project_name
     
-    # 3. 防止覆盖已有项目
-    if target_full_path.exists():
-        return f"错误：目标路径 {target_full_path} 已存在，请删除或更换项目名"
+#     # 3. 防止覆盖已有项目
+#     if target_full_path.exists():
+#         return f"错误：目标路径 {target_full_path} 已存在，请删除或更换项目名"
     
-    try:
-        # 4. 执行复制（把整个模板拷贝过去）
-        shutil.copytree(source_template, target_full_path)
+#     try:
+#         # 4. 执行复制（把整个模板拷贝过去）
+#         shutil.copytree(source_template, target_full_path)
         
-        # 5. 自动执行 npm install（如果系统安装了 Node.js）
-        # 使用 shutil.which 查找 node/npm 的完整路径，避免 PATH 环境变量问题
-        node_path = shutil.which("node")
-        npm_path = shutil.which("npm")
+#         # 5. 自动执行 npm install（如果系统安装了 Node.js）
+#         # 使用 shutil.which 查找 node/npm 的完整路径，避免 PATH 环境变量问题
+#         node_path = shutil.which("node")
+#         npm_path = shutil.which("npm")
         
-        if node_path and npm_path:
-            try:
-                install_result = subprocess.run(
-                    [npm_path, "install"],
-                    capture_output=True, text=True, cwd=str(target_full_path), timeout=300
-                )
-                if install_result.returncode == 0:
-                    return f"✅ 前端项目创建成功！\n路径：{target_full_path}\n依赖已自动安装（npm install）\n请 cd {target_full_path} 然后运行 npm run dev"
-                else:
-                    return f"✅ 前端项目创建成功！但 npm install 执行失败，请手动进入目录执行 npm install。\n错误信息：{install_result.stderr}"
-            except subprocess.TimeoutExpired:
-                return f"✅ 前端项目创建成功！但 npm install 超时，请手动进入目录执行 npm install。\n路径：{target_full_path}"
-            except Exception as e:
-                return f"✅ 前端项目创建成功！但 npm install 执行异常，请手动进入目录执行 npm install。\n路径：{target_full_path}\n错误信息：{str(e)}"
-        else:
-            return f"✅ 前端项目创建成功！\n路径：{target_full_path}\n注意：未检测到 Node.js，请手动安装依赖（npm install）"
+#         if node_path and npm_path:
+#             try:
+#                 install_result = subprocess.run(
+#                     [npm_path, "install"],
+#                     capture_output=True, text=True, cwd=str(target_full_path), timeout=300
+#                 )
+#                 if install_result.returncode == 0:
+#                     return f"✅ 前端项目创建成功！\n路径：{target_full_path}\n依赖已自动安装（npm install）\n请 cd {target_full_path} 然后运行 npm run dev"
+#                 else:
+#                     return f"✅ 前端项目创建成功！但 npm install 执行失败，请手动进入目录执行 npm install。\n错误信息：{install_result.stderr}"
+#             except subprocess.TimeoutExpired:
+#                 return f"✅ 前端项目创建成功！但 npm install 超时，请手动进入目录执行 npm install。\n路径：{target_full_path}"
+#             except Exception as e:
+#                 return f"✅ 前端项目创建成功！但 npm install 执行异常，请手动进入目录执行 npm install。\n路径：{target_full_path}\n错误信息：{str(e)}"
+#         else:
+#             return f"✅ 前端项目创建成功！\n路径：{target_full_path}\n注意：未检测到 Node.js，请手动安装依赖（npm install）"
             
-    except Exception as e:
-        return f"❌ 创建失败：{str(e)}"
+#     except Exception as e:
+#         return f"❌ 创建失败：{str(e)}"
 
 # ---------- 工具 3: 读取开发红线规则（供 AI 参考） ----------
 @mcp.tool()
-def get_rules() -> str:
-    """获取公司最新的开发约束和红线规则（Vue/ThinkPHP/FastAdmin）"""
-    rule_files = [
-        ("前端规则", REFS_DIR / "mandatory-rules.md"),
-        ("后端规则", REFS_DIR / "mandatory-rules-backend.md"),
-        ("后台规则", REFS_DIR / "mandatory-rules-admin.md"),
-    ]
+def get_rules(task_id: str = None, language: str = None) -> str:
+    """
+    获取开发规则，根据语言动态过滤。
+    如果未指定语言，尝试从任务状态中获取。
+    """
+    # 1. 如果未指定语言，尝试从状态机获取
+    if not language and task_id:
+        task_data = state_machine.get_task_state(task_id)
+        if task_data:
+            language = task_data.get("context", {}).get("language")
+
     content_parts = []
-    for title, path in rule_files:
-        if path.exists():
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read()
-                content_parts.append(f"## {title}\n{content}\n")
+
+    # 2. 加载通用规则（所有语言共用）
+    common_rules = REFS_DIR / "common" / "best_practices.md"
+    if common_rules.exists():
+        with open(common_rules, "r", encoding="utf-8") as f:
+            content_parts.append(f"## 通用规则\n{f.read()}\n")
+    else:
+        # 降级：尝试加载旧的 mandatory-rules.md
+        old_rule = REFS_DIR / "mandatory-rules.md"
+        if old_rule.exists():
+            with open(old_rule, "r", encoding="utf-8") as f:
+                content_parts.append(f"## 开发规则\n{f.read()}\n")
+
+    # # 3. 根据语言加载特定规则
+    if language:
+    # 语言名称 → 目录名映射（统一大小写和别名）
+        lang_to_dir = {
+        "node.js": "nodejs",
+        "nodejs": "nodejs",
+        "javascript": "nodejs",
+        "python": "python",
+        "php": "php",
+        "thinkphp": "php",
+        "vue": "frontend",
+        "react": "frontend",
+    }
+    lang_dir = lang_to_dir.get(language.lower(), language.lower())
+
+    # 尝试多个可能的文件名
+    possible_files = ["style_guide.md", "eslint_rules.md", "rules.md"]
+    for fname in possible_files:
+        lang_rules = REFS_DIR / lang_dir / fname
+        if lang_rules.exists():
+            with open(lang_rules, "r", encoding="utf-8") as f:
+                content_parts.append(f"## {language} 特定规则\n{f.read()}\n")
+            break
+    else:
+        # 如果所有文件都不存在，尝试降级到旧规则
+        if language.lower() in ["php", "thinkphp"]:
+            backend_rules = REFS_DIR / "mandatory-rules-backend.md"
+            if backend_rules.exists():
+                with open(backend_rules, "r", encoding="utf-8") as f:
+                    content_parts.append(f"## PHP 特定规则\n{f.read()}\n")
+        elif language.lower() in ["javascript", "nodejs", "vue", "react"]:
+            # 如果前端规则存在，加载它
+            frontend_rules = REFS_DIR / "frontend" / "vue_rules.md"
+            if frontend_rules.exists():
+                with open(frontend_rules, "r", encoding="utf-8") as f:
+                    content_parts.append(f"## JavaScript 特定规则\n{f.read()}\n")
+
     if not content_parts:
-        return "错误：未找到任何规则文件"
-    return f"【公司开发红线】\n\n" + "\n\n".join(content_parts)
+        return "未找到任何规则文件"
+    
+    return "\n\n".join(content_parts)
 
 # ---------- 工具 4: 代码规范检查（Prettier / ESLint） ----------
 @mcp.tool()
@@ -1575,97 +1808,97 @@ def run_backend_pipeline(project_path: str, fix: bool = False) -> str:
     return f"✅ 后端流水线任务已启动，任务 ID: {task_id}\n请使用 get_pipeline_status('{task_id}') 查询进度。"
 
 # ---------- 工具 13: 创建 ThinkPHP 后端项目 ----------
-@mcp.tool()
-def create_backend_project(target_path: str, project_name: str) -> str:
-    """
-    基于公司标准的 ThinkPHP 后端模板，创建一个新的后端项目。
+# @mcp.tool()
+# def create_backend_project(target_path: str, project_name: str) -> str:
+#     """
+#     基于公司标准的 ThinkPHP 后端模板，创建一个新的后端项目。
     
-    Args:
-        target_path: 要把项目创建在哪里（例如 D:/workspace）
-        project_name: 新项目的文件夹名称（例如 my-api）
-    """
-    source_template = TEMPLATES_DIR / "backend-boilerplate"
+#     Args:
+#         target_path: 要把项目创建在哪里（例如 D:/workspace）
+#         project_name: 新项目的文件夹名称（例如 my-api）
+#     """
+#     source_template = TEMPLATES_DIR / "backend-boilerplate"
     
-    # 1. 检查源模板是否存在
-    if not source_template.exists():
-        return f"错误：找不到后端模板，请确认 assets/templates/backend-boilerplate 存在"
+#     # 1. 检查源模板是否存在
+#     if not source_template.exists():
+#         return f"错误：找不到后端模板，请确认 assets/templates/backend-boilerplate 存在"
     
-    # 2. 拼接目标完整路径
-    target_full_path = Path(target_path) / project_name
+#     # 2. 拼接目标完整路径
+#     target_full_path = Path(target_path) / project_name
     
-    # 3. 防止覆盖已有项目
-    if target_full_path.exists():
-        return f"错误：目标路径 {target_full_path} 已存在，请删除或更换项目名"
+#     # 3. 防止覆盖已有项目
+#     if target_full_path.exists():
+#         return f"错误：目标路径 {target_full_path} 已存在，请删除或更换项目名"
     
-    try:
-        # 4. 执行复制
-        shutil.copytree(source_template, target_full_path)
+#     try:
+#         # 4. 执行复制
+#         shutil.copytree(source_template, target_full_path)
         
-        # 5. 自动执行 composer install（如果系统安装了 PHP）
-        php_check = subprocess.run(["php", "-v"], capture_output=True, text=True, shell=True)
-        if php_check.returncode == 0:
-            # 检查是否存在 composer.json
-            composer_file = target_full_path / "composer.json"
-            if composer_file.exists():
-                install_result = subprocess.run(
-                    ["composer", "install", "--no-dev"], 
-                    capture_output=True, text=True, 
-                    cwd=target_full_path, timeout=300, shell=True
-                )
-                if install_result.returncode == 0:
-                    return f"✅ 后端项目创建成功！\n路径：{target_full_path}\n依赖已自动安装（composer install）"
-                else:
-                    return f"✅ 后端项目创建成功！但 composer install 执行失败，请手动进入目录执行 composer install。\n错误信息：{install_result.stderr}"
-            else:
-                return f"✅ 后端项目创建成功！\n路径：{target_full_path}\n未检测到 composer.json，请确认项目结构。"
-        else:
-            return f"✅ 后端项目创建成功！\n路径：{target_full_path}\n注意：未检测到 PHP/Composer，请手动安装依赖（composer install）"
+#         # 5. 自动执行 composer install（如果系统安装了 PHP）
+#         php_check = subprocess.run(["php", "-v"], capture_output=True, text=True, shell=True)
+#         if php_check.returncode == 0:
+#             # 检查是否存在 composer.json
+#             composer_file = target_full_path / "composer.json"
+#             if composer_file.exists():
+#                 install_result = subprocess.run(
+#                     ["composer", "install", "--no-dev"], 
+#                     capture_output=True, text=True, 
+#                     cwd=target_full_path, timeout=300, shell=True
+#                 )
+#                 if install_result.returncode == 0:
+#                     return f"✅ 后端项目创建成功！\n路径：{target_full_path}\n依赖已自动安装（composer install）"
+#                 else:
+#                     return f"✅ 后端项目创建成功！但 composer install 执行失败，请手动进入目录执行 composer install。\n错误信息：{install_result.stderr}"
+#             else:
+#                 return f"✅ 后端项目创建成功！\n路径：{target_full_path}\n未检测到 composer.json，请确认项目结构。"
+#         else:
+#             return f"✅ 后端项目创建成功！\n路径：{target_full_path}\n注意：未检测到 PHP/Composer，请手动安装依赖（composer install）"
             
-    except Exception as e:
-        return f"❌ 创建失败：{str(e)}"
+#     except Exception as e:
+#         return f"❌ 创建失败：{str(e)}"
 
 # ---------- 工具 14: 创建 FastAdmin 后台项目 ----------
-@mcp.tool()
-def create_admin_project(target_path: str, project_name: str) -> str:
-    """
-    基于公司标准的 FastAdmin 后台模板，创建一个新的后台项目。
+# @mcp.tool()
+# def create_admin_project(target_path: str, project_name: str) -> str:
+#     """
+#     基于公司标准的 FastAdmin 后台模板，创建一个新的后台项目。
     
-    Args:
-        target_path: 要把项目创建在哪里（例如 D:/workspace）
-        project_name: 新项目的文件夹名称（例如 my-admin）
-    """
-    source_template = TEMPLATES_DIR / "admin-boilerplate"
+#     Args:
+#         target_path: 要把项目创建在哪里（例如 D:/workspace）
+#         project_name: 新项目的文件夹名称（例如 my-admin）
+#     """
+#     source_template = TEMPLATES_DIR / "admin-boilerplate"
     
-    if not source_template.exists():
-        return f"错误：找不到后台模板，请确认 assets/templates/admin-boilerplate 存在"
+#     if not source_template.exists():
+#         return f"错误：找不到后台模板，请确认 assets/templates/admin-boilerplate 存在"
     
-    target_full_path = Path(target_path) / project_name
-    if target_full_path.exists():
-        return f"错误：目标路径 {target_full_path} 已存在，请删除或更换项目名"
+#     target_full_path = Path(target_path) / project_name
+#     if target_full_path.exists():
+#         return f"错误：目标路径 {target_full_path} 已存在，请删除或更换项目名"
     
-    try:
-        shutil.copytree(source_template, target_full_path)
+#     try:
+#         shutil.copytree(source_template, target_full_path)
         
-        php_check = subprocess.run(["php", "-v"], capture_output=True, text=True, shell=True)
-        if php_check.returncode == 0:
-            composer_file = target_full_path / "composer.json"
-            if composer_file.exists():
-                install_result = subprocess.run(
-                    ["composer", "install", "--no-dev"], 
-                    capture_output=True, text=True, 
-                    cwd=target_full_path, timeout=300, shell=True
-                )
-                if install_result.returncode == 0:
-                    return f"✅ 后台项目创建成功！\n路径：{target_full_path}\n依赖已自动安装（composer install）\n请配置 .env 文件，然后访问 public/index.php"
-                else:
-                    return f"✅ 后台项目创建成功！但 composer install 执行失败，请手动进入目录执行 composer install。\n错误信息：{install_result.stderr}"
-            else:
-                return f"✅ 后台项目创建成功！\n路径：{target_full_path}\n未检测到 composer.json，请确认项目结构。"
-        else:
-            return f"✅ 后台项目创建成功！\n路径：{target_full_path}\n注意：未检测到 PHP/Composer，请手动安装依赖（composer install）"
+#         php_check = subprocess.run(["php", "-v"], capture_output=True, text=True, shell=True)
+#         if php_check.returncode == 0:
+#             composer_file = target_full_path / "composer.json"
+#             if composer_file.exists():
+#                 install_result = subprocess.run(
+#                     ["composer", "install", "--no-dev"], 
+#                     capture_output=True, text=True, 
+#                     cwd=target_full_path, timeout=300, shell=True
+#                 )
+#                 if install_result.returncode == 0:
+#                     return f"✅ 后台项目创建成功！\n路径：{target_full_path}\n依赖已自动安装（composer install）\n请配置 .env 文件，然后访问 public/index.php"
+#                 else:
+#                     return f"✅ 后台项目创建成功！但 composer install 执行失败，请手动进入目录执行 composer install。\n错误信息：{install_result.stderr}"
+#             else:
+#                 return f"✅ 后台项目创建成功！\n路径：{target_full_path}\n未检测到 composer.json，请确认项目结构。"
+#         else:
+#             return f"✅ 后台项目创建成功！\n路径：{target_full_path}\n注意：未检测到 PHP/Composer，请手动安装依赖（composer install）"
             
-    except Exception as e:
-        return f"❌ 创建失败：{str(e)}"
+#     except Exception as e:
+#         return f"❌ 创建失败：{str(e)}"
 
 # ---------- 工具 15: 分批扫描 FastAdmin 后台代码 ----------
 @mcp.tool()
@@ -1943,15 +2176,240 @@ def orchestrate_task(task_id: str, description: str) -> str:
 
 # ---------- 启动服务器 ----------
 if __name__ == "__main__":
-    logger.info("===== MCP 服务器启动 =====")
-    # 强制刷新所有日志句柄
-    for handler in logging.getLogger().handlers:
-        handler.flush()
-    if "--http" in sys.argv:
-        # HTTP 模式（用于代理）
-        logger.info("启动 MCP 服务在 HTTP 模式，端口 8000")
-        mcp.run(transport="sse", host="0.0.0.0", port=8000)
-    else:
-        # stdio 模式（默认）
-        logger.info("启动 MCP 服务在 stdio 模式")
-        mcp.run()
+    import sys
+    import argparse
+    import json
+    import re
+    from openai import OpenAI
+
+    parser = argparse.ArgumentParser(description="MAS-Engine MCP Server")
+    parser.add_argument("--http", action="store_true", help="启动 HTTP 模式（SSE）")
+    parser.add_argument("--standalone", action="store_true", help="独立运行模式（不依赖 Cline）")
+    parser.add_argument("--task", type=str, default="", help="独立模式下要执行的任务描述")
+    args = parser.parse_args()
+
+    # ===== 强制 stdout 重定向（仅 MCP 模式） =====
+    if not args.standalone and not args.http:
+        # 将 stdout 重定向到 stderr，确保 MCP 通信通道纯净
+        sys.stdout = sys.stderr
+        sys.stderr.write("[MCP] stdout redirected to stderr for MCP protocol\n")
+
+    if args.standalone:
+        # ===== 独立运行模式 =====
+        logger.info("===== MAS-Engine 独立运行模式 =====")
+        if not args.task:
+            sys.stderr.write("❌ 错误: --standalone 模式需要指定 --task 参数\n")
+            sys.stderr.write("示例: python server.py --standalone --task '创建一个用户登录页面'\n")
+            sys.exit(1)
+
+        task_description = args.task
+        task_id = f"standalone_{int(time.time())}"
+
+        sys.stderr.write(f"📋 任务描述: {task_description}\n")
+        sys.stderr.write(f"🆔 任务 ID: {task_id}\n")
+
+        # 1. 初始化状态机
+        task_data = state_machine.get_task_state(task_id)
+        if task_data is None:
+            if any(kw in task_description for kw in ["创建", "新建", "生成"]):
+                initial_state = AgentState.CODE_CONSTRUCTION
+                initial_role = "developer"
+            elif any(kw in task_description for kw in ["测试", "验证", "检查"]):
+                initial_state = AgentState.WEB_TESTING
+                initial_role = "tester"
+            elif any(kw in task_description for kw in ["修复", "fix"]):
+                initial_state = AgentState.SELF_HEALING
+                initial_role = "fixer"
+            else:
+                initial_state = AgentState.REQUIREMENT_EXTRACTION
+                initial_role = "analyst"
+
+            state_machine.update_task_state(
+                task_id,
+                initial_state,
+                {"description": task_description, "current_role": initial_role}
+            )
+            sys.stderr.write(f"📌 任务已创建: 初始状态={initial_state}, 角色={initial_role}\n")
+        else:
+            sys.stderr.write(f"📌 任务已存在: 当前状态={task_data.get('current_state')}\n")
+
+        # 2. 获取当前状态
+        task_data = state_machine.get_task_state(task_id)
+        current_state = task_data.get("current_state") if task_data else "requirement_extraction"
+        sys.stderr.write(f"🔧 当前状态: {current_state}\n")
+
+        # 3. 构建工具列表
+        from tool_dispatcher import DynamicToolDispatcher
+        all_tools = [
+            {"name": "search_tools", "description": "搜索可用的工具"},
+            {"name": "create_frontend_project", "description": "创建前端项目"},
+            {"name": "create_backend_project", "description": "创建后端项目"},
+            {"name": "create_admin_project", "description": "创建后台项目"},
+            {"name": "scan_code_batch", "description": "扫描代码质量问题"},
+            {"name": "run_web_audit", "description": "执行网页审计"},
+            {"name": "run_quality_pipeline", "description": "运行质量流水线"},
+            {"name": "get_pipeline_status", "description": "查询流水线状态"},
+            {"name": "orchestrate_task", "description": "任务编排入口"},
+            {"name": "get_next_message", "description": "获取下一条消息"},
+            {"name": "analyze_project_structure", "description": "分析项目结构指纹"},
+            {"name": "infer_build_steps", "description": "推理构建步骤"},
+        ]
+
+        # 4. 调用 LLM
+        client = OpenAI(
+            api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+            base_url="https://api.deepseek.com/v1"
+        )
+        if not client.api_key:
+            sys.stderr.write("❌ 错误: 未设置 DEEPSEEK_API_KEY 环境变量\n")
+            sys.exit(1)
+
+        system_prompt = f"""你是一个 AI 开发助手，当前任务 ID 是 {task_id}，当前处于 {current_state} 阶段。
+你可以调用以下工具来完成任务：
+{json.dumps(all_tools, indent=2, ensure_ascii=False)}
+
+用户任务: {task_description}
+
+重要规则：
+- 所有工具调用都必须包含 task_id 参数，值为 {task_id}
+- 你的回答必须只包含一个有效的 JSON 对象，不要有任何额外文字
+- JSON 格式: {{"tool": "工具名", "arguments": {{"参数1": "值1", "task_id": "{task_id}"}}}}
+- 如果不需要调用工具，返回 {{"tool": "none", "message": "任务已完成"}}
+"""
+
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"请执行任务: {task_description}"}
+            ],
+            temperature=0.1
+        )
+
+        raw_text = response.choices[0].message.content
+        sys.stderr.write(f"📝 LLM 原始响应: {raw_text}\n")
+
+        # 解析 JSON
+        import re
+        json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+        if not json_match:
+            sys.stderr.write("⚠️ 未找到 JSON 块，无法解析 LLM 响应\n")
+            sys.exit(1)
+        json_str = json_match.group(0)
+        try:
+            decision = json.loads(json_str)
+        except json.JSONDecodeError:
+            sys.stderr.write(f"⚠️ JSON 解析失败，原始内容: {json_str}\n")
+            sys.exit(1)
+
+        tool_name = decision.get("tool")
+        arguments = decision.get("arguments", {})
+
+        if tool_name and tool_name != "none":
+            if "task_id" not in arguments:
+                arguments["task_id"] = task_id
+                sys.stderr.write(f"🔧 自动注入 task_id: {task_id}\n")
+            sys.stderr.write(f"📌 解析结果: tool={tool_name}, args={arguments}\n")
+
+            # 工具映射
+            tool_map = {
+                "search_tools": search_tools,
+                "get_tool_details": get_tool_details,
+                "list_templates": list_templates,
+                "get_rules": get_rules,
+                "get_pipeline_status": get_pipeline_status,
+                "create_frontend_project": create_frontend_project,
+                "create_backend_project": create_backend_project,
+                "create_admin_project": create_admin_project,
+                "scan_code_batch": scan_code_batch,
+                "scan_backend_batch": scan_backend_batch,
+                "scan_admin_batch": scan_admin_batch,
+                "batch_fix_console_logs": batch_fix_console_logs,
+                "batch_fix_backend_issues": batch_fix_backend_issues,
+                "run_quality_pipeline": run_quality_pipeline,
+                "run_backend_pipeline": run_backend_pipeline,
+                "run_admin_pipeline": run_admin_pipeline,
+                "run_web_audit": run_web_audit,
+                "orchestrate_task": orchestrate_task,
+                "get_next_message": get_next_message,
+                "analyze_project_structure": analyze_project_structure,
+                "infer_build_steps": infer_build_steps,
+            }
+
+            # 参数过滤
+            tool_params = {
+                "search_tools": ["task_id", "query", "category", "role"],
+                "get_tool_details": ["tool_name"],
+                "list_templates": [],
+                "get_rules": [],
+                "get_pipeline_status": ["task_id"],
+                "create_frontend_project": ["target_path", "project_name"],
+                "create_backend_project": ["target_path", "project_name"],
+                "create_admin_project": ["target_path", "project_name"],
+                "scan_code_batch": ["project_path", "offset", "limit"],
+                "scan_backend_batch": ["project_path", "offset", "limit"],
+                "scan_admin_batch": ["project_path", "offset", "limit"],
+                "batch_fix_console_logs": ["file_paths", "dry_run"],
+                "batch_fix_backend_issues": ["file_paths", "dry_run"],
+                "run_quality_pipeline": ["project_path", "fix"],
+                "run_backend_pipeline": ["project_path", "fix"],
+                "run_admin_pipeline": ["project_path", "fix"],
+                "run_web_audit": ["task_id", "url", "wait_time"],
+                "orchestrate_task": ["task_id", "description"],
+                "get_next_message": ["task_id", "role"],
+                "analyze_project_structure": ["project_path"],
+                "infer_build_steps": ["fingerprint_json"],
+            }
+            allowed_params = tool_params.get(tool_name, [])
+            clean_args = {k: v for k, v in arguments.items() if k in allowed_params}
+            sys.stderr.write(f"📌 清洗后参数: {json.dumps(clean_args, indent=2, ensure_ascii=False)}\n")
+
+            tool_func = tool_map.get(tool_name)
+            if tool_func:
+                try:
+                    result = tool_func(**clean_args)
+                    sys.stderr.write(f"✅ 工具执行结果:\n{result}\n")
+                except Exception as e:
+                    sys.stderr.write(f"❌ 工具执行失败: {e}\n")
+                    state_machine.update_task_state(
+                        task_id,
+                        AgentState.SELF_HEALING,
+                        {"error": str(e), "failed_tool": tool_name}
+                    )
+                    sys.exit(1)
+            else:
+                sys.stderr.write(f"⚠️ 未知工具: {tool_name}\n")
+                state_machine.update_task_state(
+                    task_id,
+                    AgentState.HUMAN_INTERRUPT,
+                    {"error": f"未知工具: {tool_name}"}
+                )
+                sys.exit(1)
+
+            state_machine.update_task_state(
+                task_id,
+                AgentState.WEB_TESTING,
+                {"last_action": f"执行了 {tool_name}", "arguments": arguments}
+            )
+            sys.stderr.write(f"📌 状态已更新: {AgentState.WEB_TESTING}\n")
+        else:
+            sys.stderr.write(f"✅ 任务完成: {decision.get('message', '无消息')}\n")
+            state_machine.update_task_state(
+                task_id,
+                AgentState.DELIVERY_COMPLETED,
+                {"completed": True, "message": decision.get("message", "")}
+            )
+            sys.stderr.write(f"📌 状态已更新: {AgentState.DELIVERY_COMPLETED}\n")
+
+        sys.stderr.write("\n🎉 独立运行模式执行完成！\n")
+        sys.exit(0)
+
+    # ===== MCP 模式 =====
+if args.http:
+    import uvicorn
+    app = mcp.sse_app()
+    # 如果 app 是 FastAPI 实例，打印路由
+    if hasattr(app, "routes"):
+        for route in app.routes:
+            print(f"路由: {route.path}")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
