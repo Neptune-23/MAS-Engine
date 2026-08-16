@@ -1,0 +1,44 @@
+{
+  "Rust": {
+    "build_command": "cargo build",
+    "diagnostic_command": "cargo check --verbose",
+    "rules": [
+      {
+        "error_pattern": "link.exe not found|linker 'cc' not found",
+        "type": "missing_linker",
+        "fix_command": "rustup toolchain install stable-x86_64-pc-windows-gnu && rustup default stable-x86_64-pc-windows-gnu",
+        "description": "缺少 MSVC 链接器，切换到 GNU 工具链（无需 link.exe）"
+      },
+      {
+        "error_pattern": "failed to select a version for",
+        "type": "dependency_conflict",
+        "fix_command": "cargo update && cargo build",
+        "description": "依赖版本冲突"
+      }
+    ]
+  },
+  "Node.js": {
+    "build_command": "npm install",
+    "diagnostic_command": "npm install --dry-run",
+    "rules": [
+      {
+        "error_pattern": "npm ERR! code ENOENT|Cannot find module",
+        "type": "missing_package",
+        "fix_command": "npm install <package>",
+        "description": "缺失依赖包"
+      }
+    ]
+  },
+  "Python": {
+    "build_command": "pip install -r requirements.txt",
+    "diagnostic_command": "pip install -r requirements.txt --dry-run",
+    "rules": [
+      {
+        "error_pattern": "ModuleNotFoundError|No module named",
+        "type": "missing_dependency",
+        "fix_command": "pip install <package>",
+        "description": "Python 缺失依赖"
+      }
+    ]
+  }
+}
