@@ -1,5 +1,3 @@
-# MAS-Engine
-
 **MCP-based Multi-Agent System orchestration engine with 7-stage state machine, progressive tool discovery, and self-healing automation.**
 
 [![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -103,27 +101,15 @@ python server.py
 
 
 
-## 🏗️ 架构设计
+## 🏗️ 架构设计及状态机流转
 
 
-┌─────────────────────────────────────────────────────┐
-│                   用户层（VS Code + Cline）          │
-├─────────────────────────────────────────────────────┤
-│                  Agent 层（LLM + 工具调度）          │
-├─────────────────────────────────────────────────────┤
-│                  MCP 服务层（server.py）             │
-│  ┌───────────┐  ┌───────────┐  ┌──────────────┐   │
-│  │ 元工具层   │  │ 业务工具层 │  │ 流水线层     │   │
-│  └───────────┘  └───────────┘  └──────────────┘   │
-├─────────────────────────────────────────────────────┤
-│              状态机层（7阶状态 + 6种角色）          │
-├─────────────────────────────────────────────────────┤
-│                   数据层（MySQL + 文件系统）         │
-└─────────────────────────────────────────────────────┘
+<img width="3492" height="3254" alt="deepseek_mermaid_20260816_ed83e8" src="https://github.com/user-attachments/assets/5d2b459e-d3cc-4ae4-b552-01022ccf6f95" />
 
 
-### 状态机流转
-<img width="3533" height="458" alt="deepseek_mermaid_20260816_01ed13" src="https://github.com/user-attachments/assets/577dedc2-449b-4954-acb9-8863feaa8de0" />
+
+
+
 
 ### 角色体系
 
