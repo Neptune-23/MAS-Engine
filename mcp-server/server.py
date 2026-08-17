@@ -230,11 +230,14 @@ if __name__ == "__main__":
     import argparse
     import json
     import re
-    from openai import OpenAI
+    from llm_provider import get_llm_provider
 
     parser = argparse.ArgumentParser(description="MAS-Engine MCP Server")
     parser.add_argument("--http", action="store_true", help="启动 HTTP 模式（SSE）")
     parser.add_argument("--standalone", action="store_true", help="独立运行模式（不依赖 Cline）")
+    #快捷启动
+    parser.add_argument("--project", type=str, default=None, help="独立模式下指定项目路径，自动完成分析、推理、构建")
+    # ==========
     parser.add_argument("--task", type=str, default="", help="独立模式下要执行的任务描述")
     args = parser.parse_args()
 
@@ -243,8 +246,16 @@ if __name__ == "__main__":
         sys.stdout = sys.stderr
         sys.stderr.write("[MCP] stdout redirected to stderr for MCP protocol\n")
 
-    if args.standalone:
+    # ===== 独立运行模式 / 快捷模式 =====
+    if args.standalone or args.project:
         logger.info("===== MAS-Engine 独立运行模式 =====")
+
+        # 如果使用了 --project，自动生成标准任务描述
+        if args.project:
+            args.standalone = True
+            args.task = f"分析 {args.project} 项目结构，推理构建步骤，然后执行构建"
+            sys.stderr.write(f"🔧 快捷模式：自动生成任务描述 -> {args.task}\n")
+
         if not args.task:
             sys.stderr.write("❌ 错误: --standalone 模式需要指定 --task 参数\n")
             sys.stderr.write("示例: python server.py --standalone --task '创建一个用户登录页面'\n")
@@ -282,7 +293,7 @@ if __name__ == "__main__":
             sys.stderr.write(f"📌 任务已存在: 当前状态={task_data.get('current_state')}\n")
 
         # ===== Agent 循环 =====
-        max_iterations = 15
+        max_iterations = 20
         iteration = 0
         last_tool = None
         repeat_count = 0
@@ -331,13 +342,11 @@ if __name__ == "__main__":
             {"name": "execute_shell_command", "description": "执行 shell 命令（如构建、测试、运行等）"},
         ]
 
-        # OpenAI 客户端
-        client = OpenAI(
-            api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
-            base_url="https://api.deepseek.com/v1"
-        )
-        if not client.api_key:
-            sys.stderr.write("❌ 错误: 未设置 DEEPSEEK_API_KEY 环境变量\n")
+        # ===== 初始化 LLM 提供者 =====
+        try:
+            llm_provider = get_llm_provider()
+        except ValueError as e:
+            sys.stderr.write(f"❌ LLM 配置错误: {e}\n")
             sys.exit(1)
 
         while iteration < max_iterations:
@@ -603,19 +612,15 @@ if __name__ == "__main__":
 
             # ===== 7. 调用 LLM =====
             try:
-                response = client.chat.completions.create(
-                    model="deepseek-chat",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"请继续执行任务: {task_description}"}
-                    ],
+                 raw_text = llm_provider.generate_response(
+                    system_prompt=system_prompt,
+                    user_prompt=f"请继续执行任务: {task_description}",
                     temperature=0.1
                 )
-            except Exception as e:
+            except RuntimeError as e:
                 sys.stderr.write(f"❌ LLM 调用失败: {e}\n")
                 break
 
-            raw_text = response.choices[0].message.content
             sys.stderr.write(f"📝 LLM 原始响应: {raw_text}\n")
 
             # 8. 解析 JSON
@@ -766,6 +771,14 @@ if __name__ == "__main__":
                     context["fingerprint_summary"] = result[:300] if len(result) > 300 else result
                     if "project_path" in clean_args:
                         context["project_path"] = clean_args["project_path"]
+                    #如果返回了 error 字段就记录到上下文中
+                    try:
+                        data = json.loads(result)
+                        if "error" in data:
+                            context["analysis_error"] = data["error"]
+                            sys.stderr.write(f"⚠️ 分析失败：{data['error']}\n")
+                    except:
+                        pass
                     # 保存语言信息
                     try:
                         fingerprint_data = json.loads(result)
@@ -864,9 +877,78 @@ if __name__ == "__main__":
                 AgentState.HUMAN_INTERRUPT,
                 {**context, "reason": failure_reason}
             )
-            sys.stderr.write(f"📌 失败原因：{failure_reason}\n")
+        # ===== 生成任务报告 =====
+        report_lines = []
+        report_lines.append("\n" + "=" * 50)
+        report_lines.append("📋 MAS-Engine 任务报告")
+        report_lines.append("=" * 50)
+        
+        # 1. 任务 ID
+        report_lines.append(f"任务 ID        : {task_id}")
+        
+        # 2. 项目路径
+        project_path = context.get('project_path', '未指定')
+        report_lines.append(f"项目路径      : {project_path}")
+        
+        # 3. 分析状态（新增）
+        analysis_error = context.get('analysis_error', '')
+        if analysis_error:
+            report_lines.append(f"项目分析      : ❌ 失败 - {analysis_error}")
+        else:
+            report_lines.append(f"项目分析      : ✅ 成功")
+        
+        # 4. 最终状态
+        final_state = context.get('current_state', 'unknown')
+        last_build = context.get('last_build_result', {})
 
-        sys.stderr.write("\n🎉 独立运行模式执行完成！\n")
+        # 优先根据构建结果判断状态，再根据状态机判断
+        if last_build.get('success') is True:
+            status = "✅ 成功"
+        elif final_state == AgentState.HUMAN_INTERRUPT:
+            status = "⚠️ 失败/中断"
+        elif final_state == AgentState.DELIVERY_COMPLETED:
+            status = "✅ 成功"
+        else:
+            status = "⏹️ 未完成/未知"
+        report_lines.append(f"最终状态      : {status}")
+        
+        # 5. 构建命令
+        build_cmd = context.get('build_command', '未推理')
+        report_lines.append(f"构建命令      : {build_cmd}")
+        
+        # 6. 构建结果（如果项目不存在或分析失败，这里会是空值）
+        last_build = context.get('last_build_result', {})
+        if last_build:
+            if last_build.get('success') is True:
+                report_lines.append(f"构建结果      : ✅ 成功")
+                stdout_preview = last_build.get('stdout', '').strip()
+                if stdout_preview:
+                    report_lines.append(f"构建输出摘要  : {stdout_preview[:200]}")
+            elif last_build.get('success') is False:
+                report_lines.append(f"构建结果      : ❌ 失败 (退出码 {last_build.get('exit_code', '?')})")
+                stderr_preview = last_build.get('stderr', '').strip()
+                if stderr_preview:
+                    report_lines.append(f"错误摘要      : {stderr_preview[:200]}")
+            else:
+                report_lines.append(f"构建结果      : 未执行构建")
+        else:
+            # 如果没有执行构建，检查是否因为分析失败导致的
+            if analysis_error:
+                report_lines.append(f"构建结果      : ⚠️ 因项目分析失败，未执行构建")
+            else:
+                report_lines.append(f"构建结果      : 未执行构建")
+        
+        # 7. 重试次数
+        retry_count = context.get('build_retry_count', 0)
+        report_lines.append(f"构建重试次数  : {retry_count}")
+        
+        # 8. 失败原因（如果有）
+        failure_reason = context.get('failure_reason', '')
+        if failure_reason:
+            report_lines.append(f"失败原因      : {failure_reason}")
+        
+        report_lines.append("=" * 50)
+        sys.stderr.write("\n".join(report_lines) + "\n")
         sys.exit(0)
 
     # ===== MCP 模式 =====
