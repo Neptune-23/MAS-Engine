@@ -34,6 +34,7 @@ class AgentState:
     CODE_CONSTRUCTION = "code_construction"
     WEB_TESTING = "web_testing"
     SELF_HEALING = "self_healing"
+    FIX_APPLY = "fix_apply"
     DELIVERY_COMPLETED = "delivery_completed"
     HUMAN_INTERRUPT = "human_interrupt"
 
@@ -43,13 +44,13 @@ class TaskStateMachine:
         if db_config:
             self.host = db_config.get("host", "127.0.0.1")
             self.user = db_config.get("user", "root")
-            self.password = db_config.get("password", "")
+            self.password = db_config.get("password", "0000")
             self.database = db_config.get("database", "agent_db")
             self.charset = db_config.get("charset", "utf8mb4")
         else:
             self.host = os.getenv("DB_HOST", "127.0.0.1")
             self.user = os.getenv("DB_USER", "root")
-            self.password = os.getenv("DB_PASSWORD", "")
+            self.password = os.getenv("DB_PASSWORD", "0000")
             self.database = os.getenv("DB_NAME", "agent_db")
             self.charset = os.getenv("DB_CHARSET", "utf8mb4")
 

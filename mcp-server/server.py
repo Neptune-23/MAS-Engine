@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from memory import retrieve_memory
 
 # 将项目根目录添加到 Python 路径（让 utils、config 可导入）
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -25,6 +26,7 @@ from functools import wraps
 from utils.logger import setup_logger
 from config.settings import DB_CONFIG
 from utils.security import validate_path
+from tools.edit_tools import edit_file
 
 # 导入工具实现函数（从 tools 包）
 from tools.meta_tools import (
@@ -222,6 +224,21 @@ def execute_shell_command(command: str, cwd: str = None) -> str:
     """执行 shell 命令并返回 JSON 格式结果。用于执行构建、测试、运行等命令。"""
     return execute_shell_command_impl(command, cwd)
 
+# ===== 共享工作区文件读写工具 =====
+def read_shared_file(project_path, filename):
+    """从工作区读取约定文件"""
+    path = os.path.join(project_path, filename)
+    if not os.path.exists(path):
+        return None
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.loads(f.read())
+
+def write_shared_file(project_path, filename, data):
+    """写入共享工作区文件"""
+    path = os.path.join(project_path, filename)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2)
+
 
 # ============================================================
 # 启动入口
@@ -270,18 +287,9 @@ if __name__ == "__main__":
         # 1. 初始化状态机（如果任务不存在则创建）
         task_data = state_machine.get_task_state(task_id)
         if task_data is None:
-            if any(kw in task_description for kw in ["创建", "新建", "生成"]):
-                initial_state = AgentState.CODE_CONSTRUCTION
-                initial_role = "developer"
-            elif any(kw in task_description for kw in ["测试", "验证", "检查"]):
-                initial_state = AgentState.WEB_TESTING
-                initial_role = "tester"
-            elif any(kw in task_description for kw in ["修复", "fix"]):
-                initial_state = AgentState.SELF_HEALING
-                initial_role = "fixer"
-            else:
-                initial_state = AgentState.REQUIREMENT_EXTRACTION
-                initial_role = "analyst"
+            # 直接由 Developer 开场
+            initial_state = AgentState.CODE_CONSTRUCTION
+            initial_role = "developer"
 
             state_machine.update_task_state(
                 task_id,
@@ -293,7 +301,7 @@ if __name__ == "__main__":
             sys.stderr.write(f"📌 任务已存在: 当前状态={task_data.get('current_state')}\n")
 
         # ===== Agent 循环 =====
-        max_iterations = 20
+        max_iterations = 15
         iteration = 0
         last_tool = None
         repeat_count = 0
@@ -318,6 +326,7 @@ if __name__ == "__main__":
             "analyze_project_structure": analyze_project_structure,
             "infer_build_steps": infer_build_steps,
             "execute_shell_command": execute_shell_command,
+            "edit_file": edit_file,
         }
 
         # 基础工具列表（供 LLM 参考）
@@ -340,6 +349,7 @@ if __name__ == "__main__":
             {"name": "analyze_project_structure", "description": "分析项目结构指纹"},
             {"name": "infer_build_steps", "description": "推理构建步骤"},
             {"name": "execute_shell_command", "description": "执行 shell 命令（如构建、测试、运行等）"},
+            {"name": "edit_file", "description": "通用文件编辑工具：在文件中查找并替换字符串。适用于修复代码错误。"},
         ]
 
         # ===== 初始化 LLM 提供者 =====
@@ -348,6 +358,16 @@ if __name__ == "__main__":
         except ValueError as e:
             sys.stderr.write(f"❌ LLM 配置错误: {e}\n")
             sys.exit(1)
+
+            # 确保 project_path 在上下文中
+if args.project:
+    task_data = state_machine.get_task_state(task_id)
+    if task_data:
+        ctx = task_data.get("context", {})
+        if not ctx.get("project_path"):
+            ctx["project_path"] = args.project
+            state_machine.update_task_state(task_id, task_data["current_state"], ctx)
+            sys.stderr.write(f"📁 已注入项目路径：{args.project}\n")
 
         while iteration < max_iterations:
             iteration += 1
@@ -358,39 +378,145 @@ if __name__ == "__main__":
             if task_data is None:
                 sys.stderr.write("⚠️ 任务状态丢失，退出循环\n")
                 break
+            
             current_state = task_data.get("current_state")
             context = task_data.get("context", {})
             current_role = context.get("current_role", "developer")
             completed_steps = context.get("completed_steps", [])
 
+            # 2. 提取项目路径（现在 context 已定义）
+            project_path = context.get("project_path")
+
+            if current_state == AgentState.CODE_CONSTRUCTION:
+                current_role = "developer"
+            elif current_state == AgentState.WEB_TESTING:
+                current_role = "tester"
+            elif current_state == AgentState.SELF_HEALING:
+                current_role = "fixer"
+
+            elif current_state == AgentState.FIX_APPLY:
+                current_role = "developer"
+                context["current_role"] = current_role
+                instruction_file = os.path.join(project_path, "fix_instruction.json")
+                
+                if os.path.exists(instruction_file):
+                    with open(instruction_file, 'r', encoding='utf-8') as f:
+                        instruction = json.load(f)
+                    sys.stderr.write(f"📌 执行修复指令: {instruction}\n")
+                    
+                    target_file = instruction.get("target_file")
+                    old_string = instruction.get("old_string")
+                    new_string = instruction.get("new_string")
+                    
+                    fix_success = False
+                    fix_error = None
+                    
+                    if target_file and os.path.exists(target_file):
+                        try:
+                            with open(target_file, 'r', encoding='utf-8') as f:
+                                content = f.read()
+                            
+                            # ---------- 尝试1：精确匹配 ----------
+                            if old_string in content:
+                                new_content = content.replace(old_string, new_string)
+                                with open(target_file, 'w', encoding='utf-8') as f:
+                                    f.write(new_content)
+                                fix_success = True
+                                sys.stderr.write(f"✅ 精确替换成功: {target_file}\n")
+                            else:
+                                # ---------- 尝试2：忽略注释再匹配 ----------
+                                old_string_no_comment = old_string.split('#')[0].rstrip()
+                                if old_string_no_comment:
+                                    lines = content.splitlines(keepends=True)
+                                    new_lines = []
+                                    replaced = False
+                                    for line in lines:
+                                        if not replaced and old_string_no_comment in line:
+                                            # 用 new_string 替换该行（保留原始缩进和注释）
+                                            # 但 new_string 可能不带缩进，我们保留原行的缩进
+                                            indent = line[:len(line) - len(line.lstrip())]
+                                            # 如果 new_string 没有缩进，补上
+                                            if not new_string.lstrip() == new_string:
+                                                # new_string 已有缩进，直接替换
+                                                new_line = line.replace(old_string_no_comment, new_string)
+                                            else:
+                                                new_line = indent + new_string + '\n'
+                                            new_lines.append(new_line)
+                                            replaced = True
+                                            sys.stderr.write(f"✅ 使用忽略注释方式替换: {line.strip()} -> {new_string}\n")
+                                        else:
+                                            new_lines.append(line)
+                                    if replaced:
+                                        new_content = ''.join(new_lines)
+                                        with open(target_file, 'w', encoding='utf-8') as f:
+                                            f.write(new_content)
+                                        fix_success = True
+                                    else:
+                                        fix_error = f"未找到匹配行（原始: {old_string}, 忽略注释: {old_string_no_comment}）"
+                                        sys.stderr.write(f"❌ {fix_error}\n")
+                                else:
+                                    fix_error = "old_string 为空"
+                        except Exception as e:
+                            fix_error = str(e)
+                            sys.stderr.write(f"❌ 文件操作失败: {e}\n")
+                    else:
+                        fix_error = f"目标文件不存在: {target_file}"
+                        sys.stderr.write(f"❌ {fix_error}\n")
+                    
+                    # 写入修复结果
+                    fix_applied = {
+                        "success": fix_success,
+                        "error": fix_error,
+                        "target_file": target_file
+                    }
+                    with open(os.path.join(project_path, "fix_applied.json"), 'w', encoding='utf-8') as f:
+                        json.dump(fix_applied, f, indent=2)
+                    
+                    if fix_success:
+                        # 删除旧的 .build_success 文件，强制重新构建
+                        build_success_file = os.path.join(project_path, ".build_success")
+                        if os.path.exists(build_success_file):
+                            os.remove(build_success_file)
+                            sys.stderr.write("🗑️ 已删除旧的 .build_success，强制重新构建\n")
+                        
+                        # 设置重新构建标志
+                        context["require_rebuild"] = True
+                        context["fix_applied"] = True
+                        
+                        # 删除指令文件，切换到 CODE_CONSTRUCTION
+                        if os.path.exists(instruction_file):
+                            os.remove(instruction_file)
+                        state_machine.update_task_state(task_id, AgentState.CODE_CONSTRUCTION, context)
+                        sys.stderr.write("🔄 修复已应用，切换回 Developer 重新构建\n")
+                        continue
+                    else:
+                        # 修复失败，删除失效的指令，增加计数
+                        os.remove(instruction_file)  # 清除失效指令
+                        context["fixer_instruction_written"] = False  # 让 Fixer 重新生成
+                        context["last_error"] = f"FIX_APPLY 失败: {fix_error}"
+                        context["fix_attempt_count"] = context.get("fix_attempt_count", 0) + 1
+                        if context["fix_attempt_count"] >= 3:
+                            sys.stderr.write("❌ 修复尝试达到上限，标记任务失败\n")
+                            state_machine.update_task_state(task_id, AgentState.HUMAN_INTERRUPT, context)
+                            break
+                        else:
+                            sys.stderr.write(f"⚠️ 修复失败，重试次数: {context['fix_attempt_count']}/3，重新生成指令\n")
+                            state_machine.update_task_state(task_id, AgentState.SELF_HEALING, context)
+                            continue
+                else:
+                    sys.stderr.write("⚠️ 未找到修复指令，跳过 FIX_APPLY\n")
+                    state_machine.update_task_state(task_id, AgentState.SELF_HEALING, context)
+                    continue
+            else:
+                current_role = context.get("current_role", "developer")
+            context["current_role"] = current_role
+
             sys.stderr.write(f"📌 当前状态: {current_state}, 角色: {current_role}\n")
             sys.stderr.write(f"📌 已完成步骤: {', '.join(completed_steps) if completed_steps else '暂无'}\n")
-
-            # ===== 新增：如果上一轮构建已成功，直接标记任务完成并退出 =====
-            last_build = context.get("last_build_result", {})
-            if last_build.get("success") is True:
-                sys.stderr.write("✅ 上一轮构建已成功，任务完成。\n")
-                state_machine.update_task_state(
-                    task_id,
-                    AgentState.DELIVERY_COMPLETED,
-                    {**context, "completed": True, "message": "构建成功，任务完成"}
-                )
-                break
 
             if current_state == AgentState.DELIVERY_COMPLETED:
                 sys.stderr.write("✅ 任务已标记为完成\n")
                 break
-
-            # ===== 新增：如果修复成功但 linker 问题仍然存在，则直接报告失败并退出 =====
-            last_fix = context.get("last_fix_result", {})
-            if last_fix.get("success") is True and last_build.get("success") is False:
-                stderr_preview = last_build.get("stderr", "")
-                if "link.exe not found" in stderr_preview:
-                    sys.stderr.write("🚨 修复无效，link.exe 仍然缺失，任务失败。\n")
-                    failure_reason = "MSVC 链接器 (link.exe) 缺失，且自动修复未能解决问题。请手动安装 Visual Studio Build Tools 或切换到 GNU 工具链。"
-                    context["failure_reason"] = failure_reason
-                    state_machine.update_task_state(task_id, AgentState.HUMAN_INTERRUPT, {**context, "reason": failure_reason})
-                    break
 
             # ===== 3. 构建进度提示（强化版） =====
             progress_hint = ""
@@ -416,19 +542,38 @@ if __name__ == "__main__":
                     progress_hint += "\n📌 执行完构建后，请确认构建结果，然后返回 `tool: none` 结束任务。"
                 # 情况3：执行已完成（判断构建是否成功）
                 elif "execute_shell_command" in completed_steps:
-                    last_build = context.get("last_build_result", {})
-                    if last_build.get("success") is False:
-                        error_msg = last_build.get("stderr", "")[:300]
-                        progress_hint += f"\n⚠️ 构建执行失败！错误信息：{error_msg}..."
-                        progress_hint += "\n🔧 请分析错误信息，调用 `execute_shell_command` 执行修复命令（如配置镜像、安装工具链），然后重新执行构建。"
-                        progress_hint += f"\n📌 如果修复完成，再次调用 `execute_shell_command` 执行构建命令：`{context.get('build_command', 'cargo build')}`。"
-                        progress_hint += "\n📌 最多尝试修复 2 次，若仍失败则返回错误报告。"
+                    # 检查是否强制重新构建
+                    require_rebuild = context.get("require_rebuild", False)
+                    
+                    if require_rebuild:
+                        # 强制重新构建
+                        build_command = context.get("build_command")
+                        if build_command:
+                            progress_hint += f"\n🚨 由于修复已应用，必须重新执行构建命令：`{build_command}`。"
+                            progress_hint += f"\n📌 工作目录：`{context.get('project_path')}`。"
+                            progress_hint += "\n📌 即使 `execute_shell_command` 已在已完成步骤中，也必须重新执行。"
+                        else:
+                            progress_hint += "\n🚨 由于修复已应用，必须重新执行构建命令。请调用 `execute_shell_command`。"
+                        progress_hint += "\n📌 构建成功后，不要返回 `none`，等待状态机自动跳转。"
                     else:
-                        progress_hint += "\n✅ 所有步骤已完成。请返回 `{\"tool\": \"none\", \"message\": \"任务已完成\"}` 结束任务。"
+                        last_build = context.get("last_build_result", {})
+                        if last_build.get("success") is False:
+                            error_msg = last_build.get("stderr", "")[:300]
+                            progress_hint += f"\n⚠️ 构建执行失败！错误信息：{error_msg}..."
+                            progress_hint += "\n🔧 请分析错误信息，调用 `execute_shell_command` 执行修复命令（如配置镜像、安装工具链），然后重新执行构建。"
+                            progress_hint += f"\n📌 如果修复完成，再次调用 `execute_shell_command` 执行构建命令：`{context.get('build_command', 'cargo build')}`。"
+                            progress_hint += "\n📌 最多尝试修复 2 次，若仍失败则返回错误报告。"
+                        else:
+                            progress_hint += "\n✅ 所有步骤已完成。请返回 `{\"tool\": \"none\", \"message\": \"任务已完成\"}` 结束任务。"
                 else:
                     pass
             else:
-                progress_hint = "\n📌 当前未完成任何步骤，请从 `analyze_project_structure` 开始。"
+                progress_hint = "\n📌 当前未完成任何步骤，**必须**先调用 `analyze_project_structure`。"
+            if project_path:
+                progress_hint += f"\n   参数示例：`{{\"tool\": \"analyze_project_structure\", \"arguments\": {{\"project_path\": \"{project_path}\"}}}}`"
+            else:
+                progress_hint += "\n   请确保传入正确的 `project_path`。"
+                progress_hint += "\n   **禁止返回 `none`，直到你至少执行了一次工具调用。**"
 
             if completed_steps:
                 completed_tools_str = ", ".join(completed_steps)
@@ -479,40 +624,88 @@ if __name__ == "__main__":
                     error_hint = "\n⚠️ 当前处于自我修复阶段，请检查之前的错误并调整策略。"
 
             # ===== 5. 构建明确的“上一轮执行摘要 + 行动指引” =====
+            # 根据当前角色，给出不同的“产出要求”指引
             action_guidance = ""
-            last_build = context.get("last_build_result", {})
-            last_fix = context.get("last_fix_result", {})
-            if last_build:
-                if last_build.get("success") is True:
-                    action_guidance = "\n✅ 上一轮构建已成功。请返回 `{\"tool\": \"none\", \"message\": \"任务已完成\"}` 结束任务。"
-                elif last_build.get("success") is False:
-                    exit_code = last_build.get("exit_code")
-                    stderr_preview = last_build.get("stderr", "")[:500]
-                    action_guidance = f"\n❌ 上一轮构建失败（退出码 {exit_code}）。\n错误摘要：{stderr_preview}\n"
-                    # 如果修复命令已成功执行，但仍然出现 linker 错误，说明修复无效
-                    if last_fix.get("success") is True and "link.exe not found" in stderr_preview:
-                        action_guidance += "\n🚨 修复命令已执行成功，但 linker `link.exe` 仍然未找到。这可能是环境变量未生效或需要手动安装 Visual Studio Build Tools。请报告任务失败并手动解决。"
-                    elif last_fix.get("success") is True:
-                        action_guidance += "\n✅ 修复命令已成功执行。请立即调用 `execute_shell_command` 执行构建命令，无需再获取规则。"
-                    else:
-                        # 根据重试次数给出不同建议
-                        retry_count = context.get("build_retry_count", 0)
-                        if retry_count < 3:
-                            action_guidance += "\n🔧 建议：调用 `get_rules(language=<当前语言>)` 获取诊断规则，根据错误类型执行修复命令。"
-                        elif retry_count < 5:
-                            action_guidance += "\n🔧 建议：直接调用 `execute_shell_command` 执行已知的修复命令（例如安装 MSVC 工具链）。"
-                        else:
-                            action_guidance += "\n🚨 已经多次重试，建议调用 `execute_shell_command` 执行 `cargo clean` 后重试，或报告任务失败。"
-            else:
-                action_guidance = "\n📌 尚未执行构建命令。请开始分析并执行构建。"
+            if current_role == "developer":
+                action_guidance = "\n🚀 你是 Developer。请按以下顺序执行任务："
+                action_guidance += "\n  1. 先调用 `analyze_project_structure` 分析项目（使用上方提供的项目路径）。"
+                action_guidance += "\n  2. 然后调用 `infer_build_steps` 推理构建命令（将上一步返回的完整 JSON 作为参数）。"
+                action_guidance += "\n  3. 最后调用 `execute_shell_command` 执行推理出的构建命令。"
+                action_guidance += "\n  4. **构建成功后**，系统会自动检测到 `.build_success` 文件，状态才会推进。"
+                action_guidance += "\n  5. **在未完成上述三步之前，禁止返回 `{\"tool\": \"none\"}`。**"
+            elif current_role == "tester":
+                action_guidance = "\n🚀 你是 Tester。你的任务是执行测试，**并确保在项目目录下生成 `test_report.json` 文件**（内容包含 {\"status\": \"pass\"} 或 {\"status\": \"fail\"}）。"
+            elif current_role == "fixer":
+                action_guidance = """
+🚀 你是 Fixer。你的任务是根据测试报告修复代码，**必须**按以下步骤执行：
 
-            # 将摘要合并到系统提示中（放在最前面，让Agent第一时间看到）
-            system_prompt = f"""你是一个 AI 开发助手，当前任务 ID 是 {task_id}。
+1. **先调用 `edit_file` 修复代码错误**（你需要从测试报告中找到错误信息和具体代码位置）。
+   示例调用：
+   {"tool": "edit_file", "arguments": {"file_path": "D:/test_multi_agent_py/test_main.py", "replace_pattern": "assert add(2, 2) == 5", "replace_with": "assert add(2, 2) == 4"}}
+
+2. **修复完成后，调用 `execute_shell_command` 重新运行测试**（例如 `pytest -v`）。
+   测试成功后，系统会自动生成 `fix_result.json`。
+
+3. **只有 `fix_result.json` 存在且内容为 `{"success": true}` 时，你才能返回 `{"tool": "none"}`**。
+
+⚠️ 在未执行上述三步之前，禁止返回 `none`。
+"""
+            else:
+                # 兜底
+                action_guidance = "\n📌 请分析项目结构并执行构建。"
+
+            # ===== 构造系统提示（根据角色分流） =====
+            if current_role == "tester":
+                role_specific_instruction = "你是一个 Tester 角色。系统会自动执行测试并生成报告文件，你只需根据文件内容返回对应的 `none` 消息。"
+            elif current_role == "fixer":
+                role_specific_instruction = """
+你是一个 Fixer 角色。系统已经为你提供了测试报告和源代码内容（见下方的“情报摘要”）。
+
+你的任务：
+1. 分析情报摘要中的错误信息和代码内容。
+2. 找出需要修复的字符串。
+3. 调用 `edit_file` 工具执行修复。
+   - 参数示例：`{"file_path": "D:/test_multi_agent_py/test_main.py", "replace_pattern": "assert add(2, 2) == 5", "replace_with": "assert add(2, 2) == 4"}`
+
+修复完成后，调用 `execute_shell_command` 执行测试命令（如 `pytest`）验证修复效果。
+只有测试通过，才能返回 `{"tool": "none", "message": "修复成功"}`。
+"""
+            else:
+                role_specific_instruction = """
+你是一个 Developer 角色。负责执行构建命令，确保构建成功。
+执行步骤：
+1. 调用 `execute_shell_command` 执行构建命令。
+2. 构建成功后，返回 `{"tool": "none", "message": "任务已完成"}`。
+"""
+
+            # ---- 新增：明确项目路径和第一步动作 ----
+                project_path = context.get("project_path")
+            if project_path is None and args.project:
+                project_path = args.project
+                context["project_path"] = project_path
+                state_machine.update_task_state(task_id, current_state, context)
+
+            if project_path:
+                first_step_hint = f"\n📁 项目路径已确定为：`{project_path}`"
+                first_step_hint += f"\n🔧 **你首先必须调用 `analyze_project_structure`**，参数为 `{{'project_path': '{project_path}'}}`。"
+                first_step_hint += "\n   调用示例：`{\"tool\": \"analyze_project_structure\", \"arguments\": {\"project_path\": \"...\"}}`"
+            else:
+                first_step_hint = "\n⚠️ 未检测到项目路径，请先调用 `analyze_project_structure` 并传入正确的路径。"
+
+            system_prompt = f"""你是一个 AI 开发助手，当前角色是 {current_role}，任务 ID 是 {task_id}。
+            {first_step_hint}
+            
+
+⚡ 绝对规则：你的回答必须只包含一个有效的 JSON 对象，不要有任何额外文字。
+⚡ 不要输出任何解释、标题、描述、思考过程、Markdown 格式。
+⚡ 只输出 JSON 字典，例如：{{"tool": "analyze_project_structure", "arguments": {{"project_path": "D:/..."}}}}
+
 当前状态: {current_state}
 当前角色: {current_role}
 {action_guidance}
 {progress_hint}
 {error_hint}
+{role_specific_instruction}
 
 你可以调用以下工具来完成任务：
 {json.dumps(all_tools, indent=2, ensure_ascii=False)}
@@ -520,23 +713,12 @@ if __name__ == "__main__":
 用户任务: {task_description}
 
 重要规则：
-当 `execute_shell_command` 返回 `success=false` 时，你必须按以下步骤操作：
-
-1. **获取诊断规则**：调用 `get_rules(language=<当前语言>)` 获取该语言的诊断规则（JSON格式）。
-2. **匹配错误模式**：将 `stderr` 内容与规则中的 `error_pattern`（正则表达式）进行匹配。
-3. **执行修复**：
-   - 如果匹配成功，立即调用 `execute_shell_command` 执行对应的 `fix_command`。
-   - 如果匹配失败，则执行该语言的 `diagnostic_command`（如 `cargo check --verbose`），收集更详细的错误日志，然后再次尝试匹配或报告无法修复。
-4. **重新构建**：修复完成后，必须再次调用 `execute_shell_command` 执行构建命令（`cargo build`）。
-
-- 所有工具调用都必须包含 task_id 参数（值 {task_id}）
 - 你的回答必须只包含一个有效的 JSON 对象，不要有任何额外文字
+- 所有工具调用都必须包含 task_id 参数（值 {task_id}）
 - JSON 格式: {{"tool": "工具名", "arguments": {{"参数1": "值1", "task_id": "{task_id}"}}}}
 - 如果任务已完成，返回 {{"tool": "none", "message": "任务已完成"}}
 - 如果某个工具已经出现在“已完成步骤”列表中，则严禁再次调用该工具，必须执行下一步。
-- **特别提醒**：在自我修复状态（self_healing）下，如果诊断命令（如 `rustup`）已经成功执行过一次，则不允许再次调用相同的诊断命令。**必须立即执行构建命令**（`cargo build`）。
-- **如果 `get_rules` 已经出现在“已完成步骤”列表中，则严禁再次调用 `get_rules`**。你已经在之前轮次获取了诊断规则，直接使用这些规则即可，无需重复获取。
-- **如果修复命令已经成功执行，请立即执行构建命令**，不要再重复获取规则或诊断。
+- 如果你是 Fixer，禁止调用 analyze_project_structure、infer_build_steps 等已完成步骤。你只需要调用 edit_file 和 execute_shell_command。
 """
 
             # ===== 6. 智能诊断干预（根据语言规则） =====
@@ -610,6 +792,183 @@ if __name__ == "__main__":
                 # 强制诊断后，跳过本轮 LLM 调用，直接进入下一轮
                 continue
 
+                        # ===== 状态机硬跳转逻辑（基于产出文件验证） =====
+            project_path = context.get("project_path")
+            
+            # ---- 新增：如果项目路径还未确定，跳过本轮硬跳转 ----
+            if not project_path:
+                # 路径还没拿到，让 Agent 继续执行第一轮分析
+                pass
+            else:
+                # 1. 如果 Developer 构建成功且生成了产物文件
+                if current_role == "developer":
+                    last_build = context.get("last_build_result", {})
+                    # 检查构建是否成功，且产出文件（.build_success）存在
+                    build_success_file = os.path.join(project_path, ".build_success")
+                    if last_build.get("success") is True and os.path.exists(build_success_file):
+                        state_machine.update_task_state(task_id, AgentState.WEB_TESTING, context)
+                        sys.stderr.write("🔄 检测到构建产物，切换至 Tester 角色进行测试\n")
+                        continue
+
+                # 2. 如果 Tester 测试产出报告并失败，切换到 Fixer
+                elif current_role == "tester":
+                    report_file = os.path.join(project_path, "test_report.json")
+                    if os.path.exists(report_file):
+                        try:
+                            with open(report_file, 'r', encoding='utf-8') as f:
+                                report = json.load(f)
+                            if report.get("status") == "fail":
+                                state_machine.update_task_state(task_id, AgentState.SELF_HEALING, context)
+                                sys.stderr.write("🔄 检测到测试失败报告，切换至 Fixer 角色进行修复\n")
+                                continue
+                            elif report.get("status") == "pass":
+                                sys.stderr.write("✅ 检测到测试通过报告，任务完成。\n")
+                                state_machine.update_task_state(task_id, AgentState.DELIVERY_COMPLETED, context)
+                                break
+                        except:
+                            pass
+
+                # 3. 如果 Fixer 修复成功且生成了修复产物
+                elif current_role == "fixer":
+                    fix_file = os.path.join(project_path, "fix_result.json")
+                    if os.path.exists(fix_file):
+                        try:
+                            with open(fix_file, 'r') as f:
+                                fix_data = json.load(f)
+                            if fix_data.get("success") is True:
+                                state_machine.update_task_state(task_id, AgentState.CODE_CONSTRUCTION, context)
+                                sys.stderr.write("🔄 检测到修复成功文件，切换回 Developer 角色重新构建\n")
+                                continue
+                            # 4. 如果存在修复指令且尚未应用，切换到 FIX_APPLY
+                            if current_role == "fixer" and context.get("fixer_instruction_written") and context.get("awaiting_fix_apply"):
+                                state_machine.update_task_state(task_id, AgentState.FIX_APPLY, context)
+                                sys.stderr.write("🔄 检测到修复指令，切换至 FIX_APPLY 状态\n")
+                                context["awaiting_fix_apply"] = False
+                                state_machine.update_task_state(task_id, AgentState.FIX_APPLY, context)
+                                continue
+                        except:
+                            pass
+            # ==============================================
+
+                        # ===== 6.6 系统层情报先行（为 Fixer 提供决策依据） =====
+            project_path = context.get("project_path")
+            if project_path:
+                # ---------- 如果是 Tester，执行测试 ----------
+                if current_role == "tester":
+                    report_file = os.path.join(project_path, "test_report.json")
+                    if not os.path.exists(report_file):
+                        sys.stderr.write("🧩 Tester 接管：执行测试\n")
+                        test_steps = context.get("test_steps", [])
+                        if not test_steps:
+                            # 根据语言 fallback
+                            lang = context.get("language", "").lower()
+                            if "python" in lang:
+                                test_steps = ["pytest -v"]
+                            elif "node" in lang or "javascript" in lang:
+                                test_steps = ["npm test"]
+                            elif "rust" in lang:
+                                test_steps = ["cargo test"]
+                        if test_steps:
+                            test_cmd = f"cd /d {project_path} && {test_steps[0]}"
+                            result = tool_map["execute_shell_command"](command=test_cmd, cwd=project_path)
+                            parsed = json.loads(result)
+                            if parsed.get("success"):
+                                report = {"status": "pass"}
+                            else:
+                                report = {"status": "fail", "error": parsed.get("stderr", "")[:500]}
+                            write_shared_file(project_path, "test_report.json", report)
+                            context["test_report"] = report
+                            state_machine.update_task_state(task_id, current_state, context)
+                        continue
+
+                # ---------- 如果是 Fixer，系统代为侦查 ----------
+                if current_role == "fixer":
+                    report_file = os.path.join(project_path, "test_report.json")
+                    if os.path.exists(report_file):
+                        # 读取测试报告
+                        try:
+                            with open(report_file, 'r') as f:
+                                report_data = json.load(f)
+                            report_summary = f"测试报告: {report_data}"
+                            sys.stderr.write("🧩 Fixer 情报侦查：读取测试报告成功\n")
+                        except Exception as e:
+                            report_summary = f"读取测试报告失败: {e}"
+                            sys.stderr.write(f"⚠️ Fixer 情报侦查异常: {e}\n")
+                    else:
+                        report_summary = "未找到测试报告，可能测试未执行。"
+                        sys.stderr.write("⚠️ Fixer 情报侦查：未找到测试报告\n")
+
+                    # 读取源代码（例如 test_main.py，可根据上下文调整）
+                    code_file = os.path.join(project_path, "test_main.py")
+                    if os.path.exists(code_file):
+                        try:
+                            with open(code_file, 'r') as f:
+                                code_content = f.read()
+                            code_summary = f"代码文件 (test_main.py) 内容:\n{code_content}"
+                            sys.stderr.write("🧩 Fixer 情报侦查：读取代码成功\n")
+                        except Exception as e:
+                            code_summary = f"读取代码文件失败: {e}"
+                            sys.stderr.write(f"⚠️ Fixer 情报侦查异常: {e}\n")
+                    else:
+                        code_summary = "未找到 test_main.py 文件。"
+                        sys.stderr.write("⚠️ Fixer 情报侦查：未找到 test_main.py\n")
+
+                    # 将情报注入上下文，让 LLM 在下一轮直接看到
+                    context["fixer_intel"] = f"""
+                    === 情报摘要 ===
+                    {report_summary}
+
+                    {code_summary}
+                    """
+                state_machine.update_task_state(task_id, current_state, context)
+                    # 不继续，让下一轮 LLM 看到这些情报并决策
+
+                # ===== Fixer 分析并输出修复指令到共享工作区 =====
+                if current_role == "fixer" and not context.get("fixer_instruction_written"):
+                    # 构造 Fixer 提示，强制输出 JSON
+                    fixer_prompt = f"""
+                你是一个 Fixer 角色。根据以下测试报告和源代码，输出修复指令。
+
+                测试报告：
+                {report_summary}
+
+                源代码：
+                {code_summary}
+
+                请输出 JSON 格式的修复指令，只输出 JSON，不要有任何额外文字：
+                {{"type": "fix_instruction", "target_file": "文件路径", "operation": "replace", "old_string": "要替换的原文（必须是代码中的精确字符串，包括缩进和空格）", "new_string": "替换后的新内容", "reason": "修复原因"}}
+                """
+                    # 调用 LLM
+                    fixer_response = llm_provider.generate_response(
+                        system_prompt="你是一个 Fixer 角色，只输出 JSON。",
+                        user_prompt=fixer_prompt,
+                        temperature=0.1
+                    )
+                    sys.stderr.write(f"🧩 Fixer 生成指令: {fixer_response}\n")
+                    
+                    # 验证并写入
+                    try:
+                        fixer_instruction = json.loads(fixer_response)
+                        if fixer_instruction.get("type") == "fix_instruction":
+                            # 写入共享工作区
+                            instruction_file = os.path.join(project_path, "fix_instruction.json")
+                            with open(instruction_file, 'w', encoding='utf-8') as f:
+                                json.dump(fixer_instruction, f, indent=2)
+                            sys.stderr.write(f"✅ 修复指令已写入: {instruction_file}\n")
+                            context["fixer_instruction_written"] = True
+                            # 立即切换到 FIX_APPLY 状态
+                            state_machine.update_task_state(task_id, AgentState.SELF_HEALING, context)
+                            # 设置一个标记，让下一轮状态机识别
+                            context["awaiting_fix_apply"] = True
+                            state_machine.update_task_state(task_id, AgentState.SELF_HEALING, context)
+                            # 强制继续下一轮
+                            continue
+                    except json.JSONDecodeError:
+                        sys.stderr.write(f"❌ Fixer 输出无效 JSON: {fixer_response}\n")
+                        # 写入失败标记
+                        context["fixer_instruction_written"] = False
+                        state_machine.update_task_state(task_id, current_state, context)
+
             # ===== 7. 调用 LLM =====
             try:
                  raw_text = llm_provider.generate_response(
@@ -626,33 +985,28 @@ if __name__ == "__main__":
             # 8. 解析 JSON
             json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
             if not json_match:
-                sys.stderr.write("⚠️ 未找到 JSON 块，无法解析，退出循环\n")
-                break
+                sys.stderr.write("⚠️ 未找到 JSON 块，无法解析，尝试重试（本轮跳过）\n")
+                context["last_error"] = "LLM 输出格式错误"
+                state_machine.update_task_state(task_id, AgentState.REQUIREMENT_EXTRACTION, context)
+                continue  # 跳过本轮，下一轮重新调用 LLM
             json_str = json_match.group(0)
             try:
                 decision = json.loads(json_str)
             except json.JSONDecodeError:
                 sys.stderr.write(f"⚠️ JSON 解析失败: {json_str}\n")
-                break
+                # 记录错误，让下一轮重新尝试
+                context["last_error"] = f"LLM返回的JSON格式错误: {json_str[:200]}"
+                state_machine.update_task_state(task_id, current_state, context)
+                continue  # 不退出，重试
 
             tool_name = decision.get("tool")
             arguments = decision.get("arguments", {})
 
             # 9. 如果 LLM 返回 "none"，任务完成
             if tool_name == "none":
-                # 在 self_healing 状态下，如果构建尚未成功，不允许完成任务
-                if current_state == AgentState.SELF_HEALING:
-                    last_build = context.get("last_build_result", {})
-                    if last_build.get("success") is not True:
-                        sys.stderr.write("⚠️ 构建尚未成功，不允许返回 none，继续修复\n")
-                        continue
-                sys.stderr.write(f"✅ 任务完成: {decision.get('message', '')}\n")
-                state_machine.update_task_state(
-                    task_id,
-                    AgentState.DELIVERY_COMPLETED,
-                    {**context, "completed": True, "message": decision.get("message", "")}
-                )
-                break
+                sys.stderr.write(f"⏩ Agent 提交完成信号，等待状态机硬跳转验证...\n")
+            # 不在这里做任何验证，让状态机硬跳转逻辑根据文件存在性处理
+                continue
 
             # 10. 自动注入 task_id
             if "task_id" not in arguments:
@@ -699,26 +1053,39 @@ if __name__ == "__main__":
 
             sys.stderr.write(f"📌 清洗后参数: {json.dumps(clean_args, indent=2, ensure_ascii=False)}\n")
 
-            # 12. 特殊处理 infer_build_steps 缺少参数
+            # 12. 特殊处理 infer_build_steps
             if tool_name == "infer_build_steps":
-                fp_value = clean_args.get("fingerprint_json")
-                if not fp_value or fp_value == "{}" or fp_value == '""' or fp_value == "":
-                    fingerprint = context.get("fingerprint")
-                    if fingerprint:
-                        sys.stderr.write("🔧 自动注入 fingerprint_json（来自上一步分析结果）\n")
-                        clean_args["fingerprint_json"] = fingerprint
-                    else:
-                        sys.stderr.write("⚠️ 没有可用的 fingerprint_json，请先调用 analyze_project_structure\n")
-                        context["last_error"] = "需要先调用 analyze_project_structure 获取指纹"
-                        context["failed_tool"] = tool_name
-                        state_machine.update_task_state(
-                            task_id,
-                            AgentState.SELF_HEALING,
-                            {**context, "error": context["last_error"], "failed_tool": tool_name}
-                        )
-                        continue
+                    try:
+                        steps = json.loads(result)
+                        if "error" not in steps:
+                            build_steps = steps.get("build_steps", [])
+                            if build_steps:
+                                context["build_command"] = build_steps[0]
+                                sys.stderr.write(f"📌 已保存构建命令: {context['build_command']}\n")
+
+                            # ===== 保存测试步骤到上下文 =====
+                            test_steps = steps.get("test_steps", [])
+                            if test_steps:
+                                context["test_steps"] = test_steps
+                                sys.stderr.write(f"📌 已保存测试命令: {test_steps[0]}\n")
+
+                            # ===== 【关键修复】立刻持久化上下文，防止切换时丢失 =====
+                            state_machine.update_task_state(task_id, current_state, context)
+
+                                # ------- 调试: 打印当前上下文中的 test_steps -------
+                            sys.stderr.write(f"DEBUG [保存后]: context['test_steps'] = {context.get('test_steps')}\n")
+                            # ===================================
+                            
+                            sys.stderr.write("📌 已保存构建和测试步骤\n")
+                    except Exception as e:
+                        sys.stderr.write(f"⚠️ 解析 infer_build_steps 结果失败: {e}\n")
 
             # ========== 13. 执行工具 ==========
+            # ---- 特殊参数转换：infer_build_steps 的 fingerprint_json 应为字符串 ----
+            if tool_name == "infer_build_steps" and "fingerprint_json" in clean_args:
+                if isinstance(clean_args["fingerprint_json"], dict):
+                    clean_args["fingerprint_json"] = json.dumps(clean_args["fingerprint_json"], ensure_ascii=False)
+                    sys.stderr.write("🔧 已将 fingerprint_json 从 dict 转为 JSON 字符串\n")
             tool_func = tool_map.get(tool_name)
             if not tool_func:
                 sys.stderr.write(f"⚠️ 未知工具: {tool_name}\n")
@@ -729,13 +1096,62 @@ if __name__ == "__main__":
                 sys.stderr.write(f"✅ 工具执行成功\n")
                 sys.stderr.write(f"📊 结果摘要: {str(result)[:500]}...\n")
 
-                # -------- 保存执行结果（区分构建命令与诊断命令） --------
+                                # -------- 保存执行结果（区分构建命令与诊断命令） --------
                 if tool_name == "execute_shell_command":
                     try:
                         parsed_result = json.loads(result)
                         build_cmd = context.get("build_command")
                         current_cmd = clean_args.get("command")
-                        is_build = build_cmd and current_cmd and current_cmd.strip() == build_cmd.strip()
+                        # === 注意：先定义 is_build，再使用它 ===
+                        is_build = build_cmd and current_cmd and build_cmd in current_cmd
+                        
+                        # ===== 系统根据执行结果自动生成产出文件 =====
+                        project_path = context.get("project_path")
+                        if project_path:
+                            if current_role == "developer" and is_build and parsed_result.get("success"):
+                                # Developer 构建成功 → 自动创建 .build_success
+                                build_success_file = os.path.join(project_path, ".build_success")
+                                try:
+                                    with open(build_success_file, 'w') as f:
+                                        f.write("DONE")
+                                    sys.stderr.write(f"📌 系统自动创建构建产物: {build_success_file}\n")
+                                except Exception as e:
+                                    sys.stderr.write(f"⚠️ 创建构建产物失败: {e}\n")
+
+                                # 清除重新构建标志
+                            if context.get("require_rebuild"):
+                                context["require_rebuild"] = False
+                                sys.stderr.write("📌 已清除 require_rebuild 标志\n")
+                            
+                            elif current_role == "tester" and not is_build:
+                                # Tester 测试完成 → 自动创建 test_report.json
+                                report_file = os.path.join(project_path, "test_report.json")
+                                if parsed_result.get("success"):
+                                    report = {"status": "pass"}
+                                else:
+                                    report = {"status": "fail", "error": parsed_result.get("stderr", "")[:500]}
+                                try:
+                                    with open(report_file, 'w') as f:
+                                        json.dump(report, f, indent=2)
+                                    sys.stderr.write(f"📌 系统自动创建测试报告: {report_file}\n")
+                                except Exception as e:
+                                    sys.stderr.write(f"⚠️ 创建测试报告失败: {e}\n")
+                            
+                            elif current_role == "fixer" and not is_build:
+                                # Fixer 修复完成 → 自动创建 fix_result.json
+                                fix_file = os.path.join(project_path, "fix_result.json")
+                                if parsed_result.get("success"):
+                                    fix_data = {"success": True}
+                                else:
+                                    fix_data = {"success": False, "error": parsed_result.get("stderr", "")[:500]}
+                                try:
+                                    with open(fix_file, 'w') as f:
+                                        json.dump(fix_data, f, indent=2)
+                                    sys.stderr.write(f"📌 系统自动创建修复结果: {fix_file}\n")
+                                except Exception as e:
+                                    sys.stderr.write(f"⚠️ 创建修复结果失败: {e}\n")
+                        # ===================================================
+                        
                         if is_build:
                             context["last_build_result"] = parsed_result
                             # 更新构建重试次数
@@ -749,6 +1165,41 @@ if __name__ == "__main__":
                             sys.stderr.write("📌 已保存诊断结果到 context['last_diagnostic_result']\n")
                         # 如果构建失败，切换到自我修复状态
                         if is_build and parsed_result.get("success") is False:
+                            # ======= 【新增】记忆库检索与自动修复开始 =======
+                            language = context.get("language", "Rust")
+                            stderr = parsed_result.get("stderr", "")
+                            
+                            # 1. 检索记忆库
+                            memories = retrieve_memory(
+                                task_type=f"{language.lower()}_build",
+                                error_message=stderr,
+                                environment_tags=["windows", language.lower()]
+                            )
+                            
+                            if memories:
+                                best_memory = memories[0]
+                                fix_cmd = best_memory.get("fix_command")
+                                if fix_cmd:
+                                    sys.stderr.write(f"🧠 [记忆库] 发现历史修复方案: {best_memory.get('fix_description', '')}\n")
+                                    sys.stderr.write(f"🔧 自动应用修复: {fix_cmd}\n")
+                                    # 直接执行修复命令（复用 tool_func，即 execute_shell_command）
+                                    fix_args = {
+                                        "command": fix_cmd, 
+                                        "cwd": context.get("project_path", "D:/test_rust_project")
+                                    }
+                                    try:
+                                        fix_res = tool_func(**fix_args)
+                                        fix_parsed = json.loads(fix_res)
+                                        if fix_parsed.get("success"):
+                                            sys.stderr.write("✅ 记忆库修复成功！重置构建计数器。\n")
+                                            context["build_retry_count"] = 0
+                                            # 让 Agent 在下一轮直接重新构建
+                                        else:
+                                            sys.stderr.write(f"⚠️ 记忆库修复命令执行失败: {fix_parsed.get('stderr', '')[:200]}\n")
+                                    except Exception as e:
+                                        sys.stderr.write(f"❌ 执行记忆库修复命令异常: {e}\n")
+                            # ======= 【新增】记忆库检索与自动修复结束 =======
+
                             sys.stderr.write("⚠️ 构建执行失败，切换到自我修复状态\n")
                             context["last_error"] = parsed_result.get("stderr", "")[:500]
                             context["failed_tool"] = tool_name
@@ -789,13 +1240,17 @@ if __name__ == "__main__":
                         pass
                     sys.stderr.write("📌 已保存指纹结果到上下文\n")
 
-                if tool_name == "infer_build_steps":
+                # ===== 在 execute_shell_command 之前，确保 build_command 已保存 =====
+                if tool_name == "infer_build_steps" and "result" in locals():
                     try:
                         steps = json.loads(result)
-                        build_steps = steps.get("build_steps", [])
-                        if build_steps:
-                            context["build_command"] = build_steps[0]
-                            sys.stderr.write(f"📌 已保存构建命令: {context['build_command']}\n")
+                        if "error" not in steps:
+                            build_steps = steps.get("build_steps", [])
+                            if build_steps:
+                                context["build_command"] = build_steps[0]
+                                sys.stderr.write(f"📌 已保存构建命令: {context['build_command']}\n")
+                            else:
+                                sys.stderr.write("⚠️ 推理结果中没有 build_steps，无法设置构建命令\n")
                     except:
                         pass
 
