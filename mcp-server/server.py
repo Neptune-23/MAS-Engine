@@ -301,7 +301,7 @@ if __name__ == "__main__":
             sys.stderr.write(f"📌 任务已存在: 当前状态={task_data.get('current_state')}\n")
 
         # ===== Agent 循环 =====
-        max_iterations = 15
+        max_iterations = 20
         iteration = 0
         last_tool = None
         repeat_count = 0
@@ -384,11 +384,60 @@ if args.project:
             current_role = context.get("current_role", "developer")
             completed_steps = context.get("completed_steps", [])
 
+            # ===== 状态无进展检测（熔断） =====
+            last_fix_state = context.get("last_fix_state")
+            if last_fix_state == AgentState.FIX_APPLY and current_state == AgentState.CODE_CONSTRUCTION:
+                loop_count = context.get("fix_apply_loop_count", 0) + 1
+                context["fix_apply_loop_count"] = loop_count
+                sys.stderr.write(f"⚠️ 检测到修复-构建循环: {loop_count}/3\n")
+                if loop_count >= 3:
+                    sys.stderr.write("❌ 修复-构建循环超过3次，判定为死循环，强制终止\n")
+                    state_machine.update_task_state(task_id, AgentState.HUMAN_INTERRUPT,
+                        {**context, "failure_reason": "修复-构建循环超过3次，可能是无解问题"})
+                    break
+            else:
+                # 如果状态改变，重置计数器
+                if current_state in [AgentState.FIX_APPLY, AgentState.CODE_CONSTRUCTION]:
+                    context["last_fix_state"] = current_state
+                else:
+                    context["last_fix_state"] = None
+                    context["fix_apply_loop_count"] = 0
+
             # 2. 提取项目路径（现在 context 已定义）
             project_path = context.get("project_path")
 
             if current_state == AgentState.CODE_CONSTRUCTION:
                 current_role = "developer"
+                
+                # ===== 自动重新构建（硬刹车） =====
+                if context.get("require_rebuild") and context.get("build_command"):
+                    sys.stderr.write("🔧 检测到 require_rebuild 标志，自动执行构建命令\n")
+                    build_cmd = context.get("build_command")
+                    try:
+                        result = tool_map["execute_shell_command"](command=build_cmd, cwd=project_path)
+                        parsed = json.loads(result)
+                        
+                        if parsed.get("success"):
+                            build_success_file = os.path.join(project_path, ".build_success")
+                            with open(build_success_file, 'w') as f:
+                                f.write("DONE")
+                            sys.stderr.write(f"✅ 自动重新构建成功\n")
+                            context["require_rebuild"] = False
+                            state_machine.update_task_state(task_id, current_state, context)
+                            continue  # 让下一轮硬跳转逻辑切换到 Tester
+                        else:
+                            sys.stderr.write(f"❌ 自动重新构建失败: {parsed.get('stderr', '')[:200]}\n")
+                            state_machine.update_task_state(task_id, AgentState.SELF_HEALING, 
+                                {**context, "last_error": f"自动重新构建失败: {parsed.get('stderr', '')[:200]}"})
+                            continue
+                    except Exception as e:
+                        sys.stderr.write(f"❌ 自动重新构建异常: {e}\n")
+                        state_machine.update_task_state(task_id, AgentState.SELF_HEALING, 
+                            {**context, "last_error": f"自动重新构建异常: {e}"})
+                        continue
+                
+                # 如果不是自动重新构建，正常走 LLM 流程
+                context["current_role"] = current_role
             elif current_state == AgentState.WEB_TESTING:
                 current_role = "tester"
             elif current_state == AgentState.SELF_HEALING:
@@ -397,6 +446,86 @@ if args.project:
             elif current_state == AgentState.FIX_APPLY:
                 current_role = "developer"
                 context["current_role"] = current_role
+                
+                # ===== 多级匹配策略函数 =====
+                def try_replace(content, old_str, new_str):
+                    import re
+                    # 策略1: 精确匹配
+                    if old_str in content:
+                        return True, content.replace(old_str, new_str), "精确匹配"
+                    # 策略2: 忽略注释
+                    old_no_comment = old_str.split('#')[0].rstrip()
+                    if old_no_comment:
+                        lines = content.splitlines(keepends=True)
+                        new_lines = []
+                        replaced = False
+                        for line in lines:
+                            if not replaced and old_no_comment in line:
+                                indent = line[:len(line) - len(line.lstrip())]
+                                if not new_str.lstrip() == new_str:
+                                    new_line = line.replace(old_no_comment, new_str)
+                                else:
+                                    new_line = indent + new_str + '\n'
+                                new_lines.append(new_line)
+                                replaced = True
+                            else:
+                                new_lines.append(line)
+                        if replaced:
+                            return True, ''.join(new_lines), "忽略注释匹配"
+                    # 策略3: 忽略首尾空格
+                    old_stripped = old_str.strip()
+                    new_stripped = new_str.strip()
+                    if old_stripped:
+                        lines = content.splitlines(keepends=True)
+                        new_lines = []
+                        replaced = False
+                        for line in lines:
+                            if not replaced and old_stripped in line.strip():
+                                indent = line[:len(line) - len(line.lstrip())]
+                                if not new_str.lstrip() == new_str:
+                                    new_line = new_str + '\n'
+                                else:
+                                    new_line = indent + new_stripped + '\n'
+                                new_lines.append(new_line)
+                                replaced = True
+                            else:
+                                new_lines.append(line)
+                        if replaced:
+                            return True, ''.join(new_lines), "忽略空格匹配"
+                    # 策略4: 忽略所有空白
+                    old_no_ws = re.sub(r'\s+', '', old_str)
+                    if old_no_ws:
+                        lines = content.splitlines(keepends=True)
+                        new_lines = []
+                        replaced = False
+                        for line in lines:
+                            if not replaced and old_no_ws in re.sub(r'\s+', '', line):
+                                indent = line[:len(line) - len(line.lstrip())]
+                                if not new_str.lstrip() == new_str:
+                                    new_line = new_str + '\n'
+                                else:
+                                    new_line = indent + new_stripped + '\n'
+                                new_lines.append(new_line)
+                                replaced = True
+                            else:
+                                new_lines.append(line)
+                        if replaced:
+                            return True, ''.join(new_lines), "忽略所有空白匹配"
+                    # 策略5: 子串匹配
+                    lines = content.splitlines(keepends=True)
+                    new_lines = []
+                    replaced = False
+                    for line in lines:
+                        if not replaced and old_str in line:
+                            new_line = line.replace(old_str, new_str)
+                            new_lines.append(new_line)
+                            replaced = True
+                        else:
+                            new_lines.append(line)
+                    if replaced:
+                        return True, ''.join(new_lines), "子串匹配"
+                    return False, content, "所有策略均失败"
+                
                 instruction_file = os.path.join(project_path, "fix_instruction.json")
                 
                 if os.path.exists(instruction_file):
@@ -416,46 +545,21 @@ if args.project:
                             with open(target_file, 'r', encoding='utf-8') as f:
                                 content = f.read()
                             
-                            # ---------- 尝试1：精确匹配 ----------
-                            if old_string in content:
-                                new_content = content.replace(old_string, new_string)
+                            sys.stderr.write(f"🔍 尝试匹配: '{old_string}'\n")
+                            success, new_content, strategy = try_replace(content, old_string, new_string)
+                            
+                            if success:
                                 with open(target_file, 'w', encoding='utf-8') as f:
                                     f.write(new_content)
                                 fix_success = True
-                                sys.stderr.write(f"✅ 精确替换成功: {target_file}\n")
+                                sys.stderr.write(f"✅ 替换成功 (策略: {strategy})\n")
                             else:
-                                # ---------- 尝试2：忽略注释再匹配 ----------
-                                old_string_no_comment = old_string.split('#')[0].rstrip()
-                                if old_string_no_comment:
-                                    lines = content.splitlines(keepends=True)
-                                    new_lines = []
-                                    replaced = False
-                                    for line in lines:
-                                        if not replaced and old_string_no_comment in line:
-                                            # 用 new_string 替换该行（保留原始缩进和注释）
-                                            # 但 new_string 可能不带缩进，我们保留原行的缩进
-                                            indent = line[:len(line) - len(line.lstrip())]
-                                            # 如果 new_string 没有缩进，补上
-                                            if not new_string.lstrip() == new_string:
-                                                # new_string 已有缩进，直接替换
-                                                new_line = line.replace(old_string_no_comment, new_string)
-                                            else:
-                                                new_line = indent + new_string + '\n'
-                                            new_lines.append(new_line)
-                                            replaced = True
-                                            sys.stderr.write(f"✅ 使用忽略注释方式替换: {line.strip()} -> {new_string}\n")
-                                        else:
-                                            new_lines.append(line)
-                                    if replaced:
-                                        new_content = ''.join(new_lines)
-                                        with open(target_file, 'w', encoding='utf-8') as f:
-                                            f.write(new_content)
-                                        fix_success = True
-                                    else:
-                                        fix_error = f"未找到匹配行（原始: {old_string}, 忽略注释: {old_string_no_comment}）"
-                                        sys.stderr.write(f"❌ {fix_error}\n")
-                                else:
-                                    fix_error = "old_string 为空"
+                                fix_error = f"所有匹配策略均失败: '{old_string}'"
+                                sys.stderr.write(f"❌ {fix_error}\n")
+                                lines_preview = content.splitlines()
+                                sys.stderr.write("📄 文件中的前10行:\n")
+                                for i, line in enumerate(lines_preview[:10], 1):
+                                    sys.stderr.write(f"  {i}: {line}\n")
                         except Exception as e:
                             fix_error = str(e)
                             sys.stderr.write(f"❌ 文件操作失败: {e}\n")
@@ -473,26 +577,25 @@ if args.project:
                         json.dump(fix_applied, f, indent=2)
                     
                     if fix_success:
-                        # 删除旧的 .build_success 文件，强制重新构建
                         build_success_file = os.path.join(project_path, ".build_success")
                         if os.path.exists(build_success_file):
                             os.remove(build_success_file)
                             sys.stderr.write("🗑️ 已删除旧的 .build_success，强制重新构建\n")
                         
-                        # 设置重新构建标志
-                        context["require_rebuild"] = True
-                        context["fix_applied"] = True
-                        
-                        # 删除指令文件，切换到 CODE_CONSTRUCTION
                         if os.path.exists(instruction_file):
                             os.remove(instruction_file)
+                        
+                        context["require_rebuild"] = True
+                        context["fix_applied"] = True
+                        context["fixer_instruction_written"] = False  # 清除标志，以便 Fixer 下次重新生成
+                        
                         state_machine.update_task_state(task_id, AgentState.CODE_CONSTRUCTION, context)
                         sys.stderr.write("🔄 修复已应用，切换回 Developer 重新构建\n")
                         continue
                     else:
-                        # 修复失败，删除失效的指令，增加计数
-                        os.remove(instruction_file)  # 清除失效指令
-                        context["fixer_instruction_written"] = False  # 让 Fixer 重新生成
+                        if os.path.exists(instruction_file):
+                            os.remove(instruction_file)
+                        context["fixer_instruction_written"] = False
                         context["last_error"] = f"FIX_APPLY 失败: {fix_error}"
                         context["fix_attempt_count"] = context.get("fix_attempt_count", 0) + 1
                         if context["fix_attempt_count"] >= 3:
@@ -810,44 +913,67 @@ if args.project:
                         sys.stderr.write("🔄 检测到构建产物，切换至 Tester 角色进行测试\n")
                         continue
 
-                # 2. 如果 Tester 测试产出报告并失败，切换到 Fixer
+                # 2. 如果 Tester 已生成测试报告
                 elif current_role == "tester":
                     report_file = os.path.join(project_path, "test_report.json")
                     if os.path.exists(report_file):
                         try:
                             with open(report_file, 'r', encoding='utf-8') as f:
                                 report = json.load(f)
-                            if report.get("status") == "fail":
+                            
+                            # ===== 先处理测试结果 =====
+                            if report.get("status") == "pass":
+                                context["consecutive_test_failures_after_fix"] = 0
+                                sys.stderr.write("✅ 所有测试通过！任务完成\n")
+                                state_machine.update_task_state(task_id, AgentState.DELIVERY_COMPLETED, context)
+                                break  # 直接退出循环
+                            
+                            elif report.get("status") == "fail":
+                                # ---- 计数器逻辑（放在这里） ----
+                                if context.get("fix_applied") or context.get("require_rebuild"):
+                                    consecutive_failures = context.get("consecutive_test_failures_after_fix", 0) + 1
+                                    context["consecutive_test_failures_after_fix"] = consecutive_failures
+                                    sys.stderr.write(f"⚠️ 修复后测试仍然失败，连续失败次数: {consecutive_failures}/2\n")
+                                    if consecutive_failures >= 2:
+                                        sys.stderr.write("❌ 连续两次修复后测试仍失败，判定为无法修复，终止任务\n")
+                                        state_machine.update_task_state(task_id, AgentState.HUMAN_INTERRUPT,
+                                            {**context, "failure_reason": "连续两次修复后测试仍失败，无法自动修复"})
+                                        break
+                                else:
+                                    # 首次测试失败，重置计数器
+                                    context["consecutive_test_failures_after_fix"] = 0
+                                # ---- 计数器结束 ----
+                                
                                 state_machine.update_task_state(task_id, AgentState.SELF_HEALING, context)
                                 sys.stderr.write("🔄 检测到测试失败报告，切换至 Fixer 角色进行修复\n")
                                 continue
-                            elif report.get("status") == "pass":
-                                sys.stderr.write("✅ 检测到测试通过报告，任务完成。\n")
-                                state_machine.update_task_state(task_id, AgentState.DELIVERY_COMPLETED, context)
-                                break
-                        except:
+                                
+                        except Exception as e:
+                            sys.stderr.write(f"⚠️ 读取测试报告失败: {e}\n")
                             pass
 
-                # 3. 如果 Fixer 修复成功且生成了修复产物
+                # 3. 处理 Fixer 相关逻辑
                 elif current_role == "fixer":
+                    # ---- 优先检查：是否存在待应用的修复指令 ----
+                    if context.get("fixer_instruction_written") and context.get("awaiting_fix_apply"):
+                        state_machine.update_task_state(task_id, AgentState.FIX_APPLY, context)
+                        sys.stderr.write("🔄 检测到修复指令，切换至 FIX_APPLY 状态\n")
+                        context["awaiting_fix_apply"] = False
+                        state_machine.update_task_state(task_id, AgentState.FIX_APPLY, context)
+                        continue
+                    
+                    # ---- 其次检查：是否存在修复产物（fix_result.json） ----
                     fix_file = os.path.join(project_path, "fix_result.json")
                     if os.path.exists(fix_file):
                         try:
-                            with open(fix_file, 'r') as f:
+                            with open(fix_file, 'r', encoding='utf-8') as f:
                                 fix_data = json.load(f)
                             if fix_data.get("success") is True:
                                 state_machine.update_task_state(task_id, AgentState.CODE_CONSTRUCTION, context)
                                 sys.stderr.write("🔄 检测到修复成功文件，切换回 Developer 角色重新构建\n")
                                 continue
-                            # 4. 如果存在修复指令且尚未应用，切换到 FIX_APPLY
-                            if current_role == "fixer" and context.get("fixer_instruction_written") and context.get("awaiting_fix_apply"):
-                                state_machine.update_task_state(task_id, AgentState.FIX_APPLY, context)
-                                sys.stderr.write("🔄 检测到修复指令，切换至 FIX_APPLY 状态\n")
-                                context["awaiting_fix_apply"] = False
-                                state_machine.update_task_state(task_id, AgentState.FIX_APPLY, context)
-                                continue
-                        except:
-                            pass
+                        except Exception as e:
+                            sys.stderr.write(f"⚠️ 读取 fix_result.json 失败: {e}\n")
             # ==============================================
 
                         # ===== 6.6 系统层情报先行（为 Fixer 提供决策依据） =====
@@ -872,10 +998,49 @@ if args.project:
                             test_cmd = f"cd /d {project_path} && {test_steps[0]}"
                             result = tool_map["execute_shell_command"](command=test_cmd, cwd=project_path)
                             parsed = json.loads(result)
-                            if parsed.get("success"):
+                            if parsed_result.get("success"):
                                 report = {"status": "pass"}
                             else:
-                                report = {"status": "fail", "error": parsed.get("stderr", "")[:500]}
+                                stderr = parsed_result.get("stderr", "")
+                                # 尝试解析错误信息提取行号和内容
+                                error_lines = stderr.splitlines()
+                                failed_line = ""
+                                line_number = None
+                                expected = ""
+                                actual = ""
+                                
+                                # 常见 pytest 错误格式: "E       assert 4 == 5" 或 ">   assert add(2, 2) == 5"
+                                for line in error_lines:
+                                    if "assert" in line and "==" in line:
+                                        # 尝试提取预期和实际
+                                        parts = line.split("==")
+                                        if len(parts) == 2:
+                                            actual = parts[0].strip().split()[-1] if parts[0] else ""
+                                            expected = parts[1].strip()
+                                        # 尝试提取行号（格式如 "test_main.py:4"）
+                                    if "test_" in line and ".py:" in line:
+                                        import re
+                                        match = re.search(r'(\w+\.py):(\d+)', line)
+                                        if match:
+                                            file_name, line_num = match.groups()
+                                            line_number = int(line_num)
+                                            # 读取对应行内容
+                                            try:
+                                                with open(os.path.join(project_path, file_name), 'r', encoding='utf-8') as f:
+                                                    lines = f.readlines()
+                                                    if line_number <= len(lines):
+                                                        failed_line = lines[line_number - 1].rstrip()
+                                            except:
+                                                pass
+                                
+                                report = {
+                                    "status": "fail",
+                                    "error": stderr[:500],
+                                    "failed_line": failed_line,
+                                    "line_number": line_number,
+                                    "expected": expected,
+                                    "actual": actual
+                                }
                             write_shared_file(project_path, "test_report.json", report)
                             context["test_report"] = report
                             state_machine.update_task_state(task_id, current_state, context)
@@ -927,17 +1092,23 @@ if args.project:
                 if current_role == "fixer" and not context.get("fixer_instruction_written"):
                     # 构造 Fixer 提示，强制输出 JSON
                     fixer_prompt = f"""
-                你是一个 Fixer 角色。根据以下测试报告和源代码，输出修复指令。
+                    你是一个 Fixer 角色。根据以下测试报告和源代码，输出修复指令。
 
-                测试报告：
-                {report_summary}
+                    测试报告（包含错误行内容、行号、预期值、实际值）：
+                    {json.dumps(report_data, indent=2)}
 
-                源代码：
-                {code_summary}
+                    源代码文件内容：
+                    {code_content}
 
-                请输出 JSON 格式的修复指令，只输出 JSON，不要有任何额外文字：
-                {{"type": "fix_instruction", "target_file": "文件路径", "operation": "replace", "old_string": "要替换的原文（必须是代码中的精确字符串，包括缩进和空格）", "new_string": "替换后的新内容", "reason": "修复原因"}}
-                """
+                    ⚠️ 关键要求：
+                    1. 必须从上面的源代码中 **精确复制** 要替换的字符串（`old_string`），包括所有的空格、缩进和注释。不要自己重新构造。
+                    2. 如果错误行中包含注释，`old_string` 应该包含整行（包括注释），除非注释是乱码。
+                    3. 如果不确定，可以使用 `failed_line` 字段中的内容。
+                    4. 只有 `old_string` 与源代码完全一致，修复才能成功。
+
+                    请输出 JSON 格式的修复指令，只输出 JSON：
+                    {{"type": "fix_instruction", "target_file": "文件路径", "operation": "replace", "old_string": "从源代码中逐字复制的错误行", "new_string": "替换后的正确内容", "reason": "修复原因"}}
+                    """
                     # 调用 LLM
                     fixer_response = llm_provider.generate_response(
                         system_prompt="你是一个 Fixer 角色，只输出 JSON。",
@@ -1129,7 +1300,12 @@ if args.project:
                                 if parsed_result.get("success"):
                                     report = {"status": "pass"}
                                 else:
-                                    report = {"status": "fail", "error": parsed_result.get("stderr", "")[:500]}
+                                    # 测试失败
+                                    stderr = parsed_result.get("stderr", "")
+                                    sys.stderr.write(f"❌ 测试失败\n")
+                                    report = {"status": "fail", "error": stderr[:500]}
+
+                                write_shared_file(project_path, "test_report.json", report)
                                 try:
                                     with open(report_file, 'w') as f:
                                         json.dump(report, f, indent=2)
@@ -1320,6 +1496,25 @@ if args.project:
         # 循环结束
         if iteration >= max_iterations:
             sys.stderr.write(f"⚠️ 达到最大迭代次数 ({max_iterations})，任务失败。\n")
+
+            # ===== 检查最后一次测试结果，决定是成功还是失败 =====
+            last_test_report = context.get("test_report", {})
+            if last_test_report.get("status") == "pass":
+                    sys.stderr.write("✅ 最后一次测试已通过，视为成功交付\n")
+                    state_machine.update_task_state(task_id, AgentState.DELIVERY_COMPLETED, context)
+            else:
+                    sys.stderr.write("❌ 最后一次测试未通过，任务失败\n")
+                    failure_reason = f"达到最大迭代次数 ({max_iterations})，测试未通过"
+                    last_build = context.get("last_build_result", {})
+                    if last_build.get("success") is False:
+                        failure_reason += f"\n最后一次构建错误摘要：{last_build.get('stderr', '')[:500]}"
+                    context["failure_reason"] = failure_reason
+                    state_machine.update_task_state(
+                        task_id,
+                        AgentState.HUMAN_INTERRUPT,
+                        {**context, "reason": failure_reason}
+                    )
+
             # 将失败原因写入上下文，方便后续输出
             failure_reason = f"任务因达到最大迭代次数 ({max_iterations}) 而终止，构建仍未成功。"
             # 附加最后一次构建的错误摘要
