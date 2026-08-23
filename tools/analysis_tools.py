@@ -1,3 +1,4 @@
+import os
 import json
 from pathlib import Path
 
@@ -25,7 +26,10 @@ def analyze_project_structure_impl(project_path: str) -> str:
         "framework": None,
         "config_files": [],
         "entry_files": [],
-        "project_type": "unknown"
+        "project_type": "unknown",
+        "file_tree": [],        
+        "test_files": [],       
+        "source_files": [],     
     }
 
     for file, info in FINGERPRINT_RULES.items():
@@ -45,6 +49,31 @@ def analyze_project_structure_impl(project_path: str) -> str:
         fingerprint["project_type"] = "web_app"
     elif fingerprint["language"] == "Go" and "main.go" in fingerprint["entry_files"]:
         fingerprint["project_type"] = "cli_app"
+
+        # ===== 【新增】扫描项目所有 Python 文件，分类 =====
+    all_py_files = []
+    for py_file in path.glob("**/*.py"):
+        # 排除虚拟环境和缓存目录
+        if "venv" in py_file.parts or "__pycache__" in py_file.parts or ".pytest_cache" in py_file.parts:
+            continue
+        # 转成相对路径
+        rel_path = str(py_file.relative_to(path)).replace("\\", "/")
+        all_py_files.append(rel_path)
+    
+    # 分类：测试文件（test_*.py 或 *_test.py）和源文件
+    test_files = []
+    source_files = []
+    for f in all_py_files:
+        basename = os.path.basename(f)
+        if basename.startswith("test_") or basename.endswith("_test.py"):
+            test_files.append(f)
+        else:
+            source_files.append(f)
+    
+    # 写入 fingerprint
+    fingerprint["file_tree"] = all_py_files
+    fingerprint["test_files"] = test_files
+    fingerprint["source_files"] = source_files
 
     if not fingerprint["config_files"]:
         fingerprint["error"] = "未识别到任何已知的项目指纹文件"

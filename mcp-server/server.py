@@ -281,6 +281,28 @@ if __name__ == "__main__":
         task_description = args.task
         task_id = f"standalone_{int(time.time())}"
 
+                # ===== 【P0-步骤1】自动扫描项目结构，生成 project_structure.json =====
+        if args.project:
+            project_path = args.project
+            structure_file = os.path.join(project_path, "project_structure.json")
+            if not os.path.exists(structure_file):
+                sys.stderr.write(f"🔍 正在扫描项目结构：{project_path}\n")
+                try:
+                    result_json = analyze_project_structure_impl(project_path)
+                    result = json.loads(result_json)
+                    with open(structure_file, 'w', encoding='utf-8') as f:
+                        json.dump(result, f, indent=2, ensure_ascii=False)
+                    sys.stderr.write(f"✅ 项目结构已写入：{structure_file}\n")
+                    # 把项目路径和语言存到上下文中
+                    task_data = state_machine.get_task_state(task_id)
+                    if task_data:
+                        ctx = task_data.get("context", {})
+                        ctx["project_path"] = project_path
+                        ctx["language"] = result.get("language", "unknown")
+                        state_machine.update_task_state(task_id, task_data["current_state"], ctx)
+                except Exception as e:
+                    sys.stderr.write(f"❌ 扫描项目结构失败：{e}\n")
+
         sys.stderr.write(f"📋 任务描述: {task_description}\n")
         sys.stderr.write(f"🆔 任务 ID: {task_id}\n")
 
@@ -534,38 +556,61 @@ if args.project:
                     sys.stderr.write(f"📌 执行修复指令: {instruction}\n")
                     
                     target_file = instruction.get("target_file")
+                    # ===== 将相对路径转为绝对路径（基于项目根目录） =====
+                    if target_file:
+                        target_file = os.path.join(project_path, target_file)
                     old_string = instruction.get("old_string")
                     new_string = instruction.get("new_string")
                     
                     fix_success = False
                     fix_error = None
-                    
-                    if target_file and os.path.exists(target_file):
-                        try:
-                            with open(target_file, 'r', encoding='utf-8') as f:
-                                content = f.read()
-                            
-                            sys.stderr.write(f"🔍 尝试匹配: '{old_string}'\n")
-                            success, new_content, strategy = try_replace(content, old_string, new_string)
-                            
-                            if success:
-                                with open(target_file, 'w', encoding='utf-8') as f:
+
+                    operation = instruction.get("operation", "replace")
+
+                    if operation == "append":
+                        # 追加模式：直接追加到文件末尾
+                        new_content = instruction.get("new_string")
+                        if target_file and new_content:
+                            try:
+                                os.makedirs(os.path.dirname(target_file), exist_ok=True)
+                                with open(target_file, 'a', encoding='utf-8') as f:
+                                    # 确保末尾有换行
+                                    if not new_content.endswith('\n'):
+                                        new_content += '\n'
                                     f.write(new_content)
                                 fix_success = True
-                                sys.stderr.write(f"✅ 替换成功 (策略: {strategy})\n")
-                            else:
-                                fix_error = f"所有匹配策略均失败: '{old_string}'"
-                                sys.stderr.write(f"❌ {fix_error}\n")
-                                lines_preview = content.splitlines()
-                                sys.stderr.write("📄 文件中的前10行:\n")
-                                for i, line in enumerate(lines_preview[:10], 1):
-                                    sys.stderr.write(f"  {i}: {line}\n")
-                        except Exception as e:
-                            fix_error = str(e)
-                            sys.stderr.write(f"❌ 文件操作失败: {e}\n")
+                                sys.stderr.write(f"✅ 追加成功: {target_file} -> {new_content.strip()}\n")
+                            except Exception as e:
+                                fix_error = str(e)
+                                sys.stderr.write(f"❌ 追加失败: {e}\n")
                     else:
-                        fix_error = f"目标文件不存在: {target_file}"
-                        sys.stderr.write(f"❌ {fix_error}\n")
+                    
+                        if target_file and os.path.exists(target_file):
+                            try:
+                                with open(target_file, 'r', encoding='utf-8') as f:
+                                    content = f.read()
+                                
+                                sys.stderr.write(f"🔍 尝试匹配: '{old_string}'\n")
+                                success, new_content, strategy = try_replace(content, old_string, new_string)
+                                
+                                if success:
+                                    with open(target_file, 'w', encoding='utf-8') as f:
+                                        f.write(new_content)
+                                    fix_success = True
+                                    sys.stderr.write(f"✅ 替换成功 (策略: {strategy})\n")
+                                else:
+                                    fix_error = f"所有匹配策略均失败: '{old_string}'"
+                                    sys.stderr.write(f"❌ {fix_error}\n")
+                                    lines_preview = content.splitlines()
+                                    sys.stderr.write("📄 文件中的前10行:\n")
+                                    for i, line in enumerate(lines_preview[:10], 1):
+                                        sys.stderr.write(f"  {i}: {line}\n")
+                            except Exception as e:
+                                fix_error = str(e)
+                                sys.stderr.write(f"❌ 文件操作失败: {e}\n")
+                        else:
+                            fix_error = f"目标文件不存在: {target_file}"
+                            sys.stderr.write(f"❌ {fix_error}\n")
                     
                     # 写入修复结果
                     fix_applied = {
@@ -582,12 +627,17 @@ if args.project:
                             os.remove(build_success_file)
                             sys.stderr.write("🗑️ 已删除旧的 .build_success，强制重新构建\n")
                         
+                        old_report = os.path.join(project_path, "test_report.json")
+                        if os.path.exists(old_report):
+                            os.remove(old_report)
+                            sys.stderr.write("🗑️ 已删除旧的 test_report.json，强制重新测试\n")
+                        
                         if os.path.exists(instruction_file):
                             os.remove(instruction_file)
                         
                         context["require_rebuild"] = True
                         context["fix_applied"] = True
-                        context["fixer_instruction_written"] = False  # 清除标志，以便 Fixer 下次重新生成
+                        context["fixer_instruction_written"] = False
                         
                         state_machine.update_task_state(task_id, AgentState.CODE_CONSTRUCTION, context)
                         sys.stderr.write("🔄 修复已应用，切换回 Developer 重新构建\n")
@@ -795,7 +845,27 @@ if args.project:
             else:
                 first_step_hint = "\n⚠️ 未检测到项目路径，请先调用 `analyze_project_structure` 并传入正确的路径。"
 
-            system_prompt = f"""你是一个 AI 开发助手，当前角色是 {current_role}，任务 ID 是 {task_id}。
+                        # ===== 【P0-步骤2】从工作区读取项目结构，注入到 System Prompt 开头 =====
+            project_structure_text = ""
+            structure_file = os.path.join(project_path, "project_structure.json") if project_path else None
+            if structure_file and os.path.exists(structure_file):
+                try:
+                    with open(structure_file, 'r', encoding='utf-8') as f:
+                        struct = json.load(f)
+                    file_tree = struct.get("file_tree", [])
+                    if file_tree:
+                        project_structure_text = "\n📁 当前项目文件结构：\n"
+                        for fpath in file_tree:
+                            project_structure_text += f"  - {fpath}\n"
+                    lang = struct.get("language", "未知")
+                    project_structure_text += f"📌 项目语言：{lang}\n"
+                except Exception as e:
+                    sys.stderr.write(f"⚠️ 读取项目结构失败：{e}\n")
+            else:
+                project_structure_text = "\n⚠️ 未检测到项目结构文件，请先调用 analyze_project_structure。\n"
+
+            system_prompt = f"""{project_structure_text}
+            你是一个 AI 开发助手，当前角色是 {current_role}，任务 ID 是 {task_id}。当前项目语言类型：{context.get('language', '未知')}
             {first_step_hint}
             
 
@@ -822,6 +892,7 @@ if args.project:
 - 如果任务已完成，返回 {{"tool": "none", "message": "任务已完成"}}
 - 如果某个工具已经出现在“已完成步骤”列表中，则严禁再次调用该工具，必须执行下一步。
 - 如果你是 Fixer，禁止调用 analyze_project_structure、infer_build_steps 等已完成步骤。你只需要调用 edit_file 和 execute_shell_command。
+- ⚠️ 特别注意：调用 infer_build_steps 时，fingerprint_json 必须是一个 JSON 字符串（用引号括起来），不能是对象。正确示例：{{"tool": "infer_build_steps", "arguments": {{"fingerprint_json": "{{\"language\": \"Python\"}}", "task_id": "{task_id}"}}}}
 """
 
             # ===== 6. 智能诊断干预（根据语言规则） =====
@@ -974,142 +1045,202 @@ if args.project:
                                 continue
                         except Exception as e:
                             sys.stderr.write(f"⚠️ 读取 fix_result.json 失败: {e}\n")
-            # ==============================================
 
-                        # ===== 6.6 系统层情报先行（为 Fixer 提供决策依据） =====
+            # ===== 6.6 系统层情报先行（为 Fixer 提供决策依据） =====
             project_path = context.get("project_path")
+            
             if project_path:
-                # ---------- 如果是 Tester，执行测试 ----------
+                # ---------- Tester，执行测试 ----------
                 if current_role == "tester":
                     report_file = os.path.join(project_path, "test_report.json")
                     if not os.path.exists(report_file):
                         sys.stderr.write("🧩 Tester 接管：执行测试\n")
                         test_steps = context.get("test_steps", [])
                         if not test_steps:
-                            # 根据语言 fallback
                             lang = context.get("language", "").lower()
                             if "python" in lang:
-                                test_steps = ["pytest -v"]
+                                struct_file = os.path.join(project_path, "project_structure.json")
+                                test_files = []
+                                if os.path.exists(struct_file):
+                                    try:
+                                        with open(struct_file, 'r', encoding='utf-8') as f:
+                                            struct_data = json.load(f)
+                                            test_files = struct_data.get("test_files", [])
+                                    except:
+                                        pass
+                                if test_files:
+                                    if len(test_files) == 1:
+                                        test_steps = [f"pytest {test_files[0]} -v --tb=long"]
+                                    else:
+                                        test_steps = ["pytest -v --tb=long"]
+                                    sys.stderr.write(f"🧪 发现测试文件: {test_files}\n")
+                                else:
+                                    test_steps = ["pytest -v --tb=long"]
                             elif "node" in lang or "javascript" in lang:
                                 test_steps = ["npm test"]
                             elif "rust" in lang:
                                 test_steps = ["cargo test"]
                         if test_steps:
-                            test_cmd = f"cd /d {project_path} && {test_steps[0]}"
-                            result = tool_map["execute_shell_command"](command=test_cmd, cwd=project_path)
+                            result = tool_map["execute_shell_command"](command=test_steps[0], cwd=project_path)
                             parsed = json.loads(result)
-                            if parsed_result.get("success"):
-                                report = {"status": "pass"}
+                            if parsed.get("success") and parsed.get("exit_code") == 0:
+                                report = {"status": "pass", "message": "所有测试通过", "full_output": parsed.get("stdout", "")}
+                                sys.stderr.write("✅ 测试全部通过！\n")
                             else:
-                                stderr = parsed_result.get("stderr", "")
-                                # 尝试解析错误信息提取行号和内容
-                                error_lines = stderr.splitlines()
-                                failed_line = ""
-                                line_number = None
-                                expected = ""
-                                actual = ""
-                                
-                                # 常见 pytest 错误格式: "E       assert 4 == 5" 或 ">   assert add(2, 2) == 5"
-                                for line in error_lines:
-                                    if "assert" in line and "==" in line:
-                                        # 尝试提取预期和实际
-                                        parts = line.split("==")
-                                        if len(parts) == 2:
-                                            actual = parts[0].strip().split()[-1] if parts[0] else ""
-                                            expected = parts[1].strip()
-                                        # 尝试提取行号（格式如 "test_main.py:4"）
-                                    if "test_" in line and ".py:" in line:
-                                        import re
-                                        match = re.search(r'(\w+\.py):(\d+)', line)
-                                        if match:
-                                            file_name, line_num = match.groups()
-                                            line_number = int(line_num)
-                                            # 读取对应行内容
-                                            try:
-                                                with open(os.path.join(project_path, file_name), 'r', encoding='utf-8') as f:
-                                                    lines = f.readlines()
-                                                    if line_number <= len(lines):
-                                                        failed_line = lines[line_number - 1].rstrip()
-                                            except:
-                                                pass
-                                
+                                full_stdout = parsed.get("stdout", "")
+                                full_stderr = parsed.get("stderr", "")
                                 report = {
                                     "status": "fail",
-                                    "error": stderr[:500],
-                                    "failed_line": failed_line,
-                                    "line_number": line_number,
-                                    "expected": expected,
-                                    "actual": actual
+                                    "error_type": "test_failure",
+                                    "full_stdout": full_stdout,
+                                    "full_stderr": full_stderr,
+                                    "exit_code": parsed.get("exit_code")
                                 }
+                                error_preview = (full_stderr or full_stdout)[:200]
+                                sys.stderr.write(f"❌ 测试失败：{error_preview}\n")
                             write_shared_file(project_path, "test_report.json", report)
                             context["test_report"] = report
                             state_machine.update_task_state(task_id, current_state, context)
-                        continue
+                            continue
 
-                # ---------- 如果是 Fixer，系统代为侦查 ----------
-                if current_role == "fixer":
-                    report_file = os.path.join(project_path, "test_report.json")
-                    if os.path.exists(report_file):
-                        # 读取测试报告
-                        try:
-                            with open(report_file, 'r') as f:
-                                report_data = json.load(f)
-                            report_summary = f"测试报告: {report_data}"
-                            sys.stderr.write("🧩 Fixer 情报侦查：读取测试报告成功\n")
-                        except Exception as e:
-                            report_summary = f"读取测试报告失败: {e}"
-                            sys.stderr.write(f"⚠️ Fixer 情报侦查异常: {e}\n")
-                    else:
-                        report_summary = "未找到测试报告，可能测试未执行。"
-                        sys.stderr.write("⚠️ Fixer 情报侦查：未找到测试报告\n")
+            # ---------- Fixer，系统代为侦查并生成修复指令 ----------
+            if current_role == "fixer":
+                sys.stderr.write("🧩 Fixer 接管：开始情报侦查\n")
+                report_file = os.path.join(project_path, "test_report.json")
+                if os.path.exists(report_file):
+                    try:
+                        with open(report_file, 'r', encoding='utf-8') as f:
+                            report_data = json.load(f)
+                        report_summary = f"测试报告: {report_data}"
+                        sys.stderr.write("🧩 Fixer 情报侦查：读取测试报告成功\n")
+                    except Exception as e:
+                        report_summary = f"读取测试报告失败: {e}"
+                        sys.stderr.write(f"⚠️ Fixer 情报侦查异常: {e}\n")
+                        report_data = {"error": str(e)} 
+                else:
+                    report_summary = "未找到测试报告，可能测试未执行。"
+                    sys.stderr.write("⚠️ Fixer 情报侦查：未找到测试报告\n")
+                    report_data = {"error": "未找到测试报告"}
 
-                    # 读取源代码（例如 test_main.py，可根据上下文调整）
-                    code_file = os.path.join(project_path, "test_main.py")
-                    if os.path.exists(code_file):
-                        try:
-                            with open(code_file, 'r') as f:
-                                code_content = f.read()
-                            code_summary = f"代码文件 (test_main.py) 内容:\n{code_content}"
-                            sys.stderr.write("🧩 Fixer 情报侦查：读取代码成功\n")
-                        except Exception as e:
-                            code_summary = f"读取代码文件失败: {e}"
-                            sys.stderr.write(f"⚠️ Fixer 情报侦查异常: {e}\n")
-                    else:
-                        code_summary = "未找到 test_main.py 文件。"
-                        sys.stderr.write("⚠️ Fixer 情报侦查：未找到 test_main.py\n")
-
-                    # 将情报注入上下文，让 LLM 在下一轮直接看到
-                    context["fixer_intel"] = f"""
-                    === 情报摘要 ===
-                    {report_summary}
-
-                    {code_summary}
+                # ===== 测试合理性检查 =====
+                test_assertion_warning = ""
+                if report_data.get("status") == "fail":
+                    full_output = report_data.get("full_stdout", "") + report_data.get("full_stderr", "")
+                    import re
+                    match = re.search(r'assert add\((\d+),\s*(\d+)\)\s*==\s*(\d+)', full_output)
+                    if match:
+                        a, b, expected = int(match.group(1)), int(match.group(2)), int(match.group(3))
+                        actual = a + b
+                        if actual != expected:
+                            test_assertion_warning = f"""
+                    ⚠️ 系统检测到：测试断言中 add({a}, {b}) 期望返回 {expected}，但实际数学结果是 {actual}。
+                    这很可能是测试用例写错了（期望值不合理），而不是源代码有 bug。
+                    你应该修复测试文件，而不是修改源代码。
                     """
-                state_machine.update_task_state(task_id, current_state, context)
-                    # 不继续，让下一轮 LLM 看到这些情报并决策
+                            sys.stderr.write(f"🧠 系统自动检测：测试断言不合理！{a}+{b}={actual}，期望{expected}\n")
 
-                # ===== Fixer 分析并输出修复指令到共享工作区 =====
-                if current_role == "fixer" and not context.get("fixer_instruction_written"):
-                    # 构造 Fixer 提示，强制输出 JSON
+                # ===== 读取项目结构 =====
+                struct_file = os.path.join(project_path, "project_structure.json")
+                all_py_files = []
+                test_files = []
+                source_files = []
+                if os.path.exists(struct_file):
+                    try:
+                        with open(struct_file, 'r', encoding='utf-8') as f:
+                            struct_data = json.load(f)
+                            all_py_files = struct_data.get("file_tree", [])
+                            test_files = struct_data.get("test_files", [])
+                            source_files = struct_data.get("source_files", [])
+                    except Exception as e:
+                        sys.stderr.write(f"⚠️ 读取项目结构失败：{e}\n")
+                
+                if not source_files and all_py_files:
+                    source_files = [f for f in all_py_files if f not in test_files]
+                if not test_files and all_py_files:
+                    test_files = [f for f in all_py_files if f.startswith("test_") or f.endswith("_test.py")]
+
+                # ===== 读取测试文件 =====
+                test_content = ""
+                if test_files:
+                    test_file_path = os.path.join(project_path, test_files[0])
+                    if os.path.exists(test_file_path):
+                        try:
+                            with open(test_file_path, 'r', encoding='utf-8') as f:
+                                test_content = f.read()
+                            sys.stderr.write(f"🧩 Fixer 情报侦查：读取测试文件 {test_files[0]} 成功\n")
+                        except Exception as e:
+                            sys.stderr.write(f"⚠️ 读取测试文件失败：{e}\n")
+                
+                # ===== 读取源文件 =====
+                source_content = ""
+                source_filename = ""
+                if source_files:
+                    priority_files = ["main.py", "app.py", "src/main.py", "src/app.py"]
+                    selected_source = None
+                    for p in priority_files:
+                        if p in source_files:
+                            selected_source = p
+                            break
+                    if not selected_source:
+                        selected_source = source_files[0]
+                    source_filename = selected_source
+                    source_file_path = os.path.join(project_path, selected_source)
+                    if os.path.exists(source_file_path):
+                        try:
+                            with open(source_file_path, 'r', encoding='utf-8') as f:
+                                source_content = f.read()
+                            sys.stderr.write(f"🧩 Fixer 情报侦查：读取源文件 {selected_source} 成功\n")
+                        except Exception as e:
+                            sys.stderr.write(f"⚠️ 读取源文件失败：{e}\n")
+
+                # ===== 强制重置标志 =====
+                context["fixer_instruction_written"] = False
+                context["code_filename"] = test_files[0] if test_files else "test_main.py"
+                context["source_filename"] = source_filename
+                context["fixer_intel"] = f"""
+                === 情报摘要 ===
+                {report_summary}
+
+                === 测试文件内容（{test_files[0] if test_files else '未找到'}）===
+                {test_content}
+
+                === 源文件内容（{source_filename if source_filename else '未找到'}）===
+                {source_content}
+                """
+                state_machine.update_task_state(task_id, current_state, context)
+
+                # ===== Fixer 生成修复指令 =====
+                if not context.get("fixer_instruction_written"):
                     fixer_prompt = f"""
                     你是一个 Fixer 角色。根据以下测试报告和源代码，输出修复指令。
 
-                    测试报告（包含错误行内容、行号、预期值、实际值）：
+                    ⚠️ 当前测试失败，你必须生成一条有效的修复指令（JSON 格式），禁止返回 `{{"tool": "none"}}`。
+
+                    当前项目语言类型：{context.get('language', 'Python')}
+
+                    ⚠️ 测试文件：{context.get('code_filename', '未找到')}
+                    ⚠️ 源文件：{context.get('source_filename', '未找到')}
+
+                    测试报告：
                     {json.dumps(report_data, indent=2)}
 
-                    源代码文件内容：
-                    {code_content}
+                    【测试文件内容】：
+                    {test_content}
 
-                    ⚠️ 关键要求：
-                    1. 必须从上面的源代码中 **精确复制** 要替换的字符串（`old_string`），包括所有的空格、缩进和注释。不要自己重新构造。
-                    2. 如果错误行中包含注释，`old_string` 应该包含整行（包括注释），除非注释是乱码。
-                    3. 如果不确定，可以使用 `failed_line` 字段中的内容。
-                    4. 只有 `old_string` 与源代码完全一致，修复才能成功。
+                    【被测试的源文件内容】：
+                    {source_content}
 
-                    请输出 JSON 格式的修复指令，只输出 JSON：
-                    {{"type": "fix_instruction", "target_file": "文件路径", "operation": "replace", "old_string": "从源代码中逐字复制的错误行", "new_string": "替换后的正确内容", "reason": "修复原因"}}
+                    {test_assertion_warning}
+
+                    判断原则：
+                    1. 如果测试期望值明显违反常识（如 2+2 期望 5），说明测试断言写错了 → 修复测试文件。
+                    2. 如果测试期望值合理（如 add(2, 3) 期望 5），但实际返回值不符 → 修复源文件。
+
+                    输出 JSON 格式：
+                    {{"type": "fix_instruction", "target_file": "文件路径", "operation": "replace", "old_string": "要替换的原文", "new_string": "新内容", "reason": "修复原因"}}
+
+                    只输出 JSON，不要有任何额外文字。
                     """
-                    # 调用 LLM
                     fixer_response = llm_provider.generate_response(
                         system_prompt="你是一个 Fixer 角色，只输出 JSON。",
                         user_prompt=fixer_prompt,
@@ -1117,28 +1248,22 @@ if args.project:
                     )
                     sys.stderr.write(f"🧩 Fixer 生成指令: {fixer_response}\n")
                     
-                    # 验证并写入
                     try:
                         fixer_instruction = json.loads(fixer_response)
                         if fixer_instruction.get("type") == "fix_instruction":
-                            # 写入共享工作区
                             instruction_file = os.path.join(project_path, "fix_instruction.json")
                             with open(instruction_file, 'w', encoding='utf-8') as f:
                                 json.dump(fixer_instruction, f, indent=2)
                             sys.stderr.write(f"✅ 修复指令已写入: {instruction_file}\n")
                             context["fixer_instruction_written"] = True
-                            # 立即切换到 FIX_APPLY 状态
-                            state_machine.update_task_state(task_id, AgentState.SELF_HEALING, context)
-                            # 设置一个标记，让下一轮状态机识别
                             context["awaiting_fix_apply"] = True
                             state_machine.update_task_state(task_id, AgentState.SELF_HEALING, context)
-                            # 强制继续下一轮
                             continue
                     except json.JSONDecodeError:
                         sys.stderr.write(f"❌ Fixer 输出无效 JSON: {fixer_response}\n")
-                        # 写入失败标记
                         context["fixer_instruction_written"] = False
                         state_machine.update_task_state(task_id, current_state, context)
+                        continue
 
             # ===== 7. 调用 LLM =====
             try:
@@ -1159,13 +1284,13 @@ if args.project:
                 sys.stderr.write("⚠️ 未找到 JSON 块，无法解析，尝试重试（本轮跳过）\n")
                 context["last_error"] = "LLM 输出格式错误"
                 state_machine.update_task_state(task_id, AgentState.REQUIREMENT_EXTRACTION, context)
-                continue  # 跳过本轮，下一轮重新调用 LLM
+                continue
+
             json_str = json_match.group(0)
             try:
                 decision = json.loads(json_str)
             except json.JSONDecodeError:
                 sys.stderr.write(f"⚠️ JSON 解析失败: {json_str}\n")
-                # 记录错误，让下一轮重新尝试
                 context["last_error"] = f"LLM返回的JSON格式错误: {json_str[:200]}"
                 state_machine.update_task_state(task_id, current_state, context)
                 continue  # 不退出，重试
@@ -1175,9 +1300,14 @@ if args.project:
 
             # 9. 如果 LLM 返回 "none"，任务完成
             if tool_name == "none":
-                sys.stderr.write(f"⏩ Agent 提交完成信号，等待状态机硬跳转验证...\n")
-            # 不在这里做任何验证，让状态机硬跳转逻辑根据文件存在性处理
-                continue
+                if current_role == "fixer":
+                    sys.stderr.write("❌ Fixer 错误地返回了 none，但测试尚未通过，强制中断任务\n")
+                    state_machine.update_task_state(task_id, AgentState.HUMAN_INTERRUPT, 
+                        {**context, "failure_reason": "Fixer 未生成修复指令"})
+                    break
+                else:
+                    sys.stderr.write(f"⏩ Agent 提交完成信号，等待状态机硬跳转验证...\n")
+                    continue
 
             # 10. 自动注入 task_id
             if "task_id" not in arguments:
@@ -1295,15 +1425,17 @@ if args.project:
                                 sys.stderr.write("📌 已清除 require_rebuild 标志\n")
                             
                             elif current_role == "tester" and not is_build:
-                                # Tester 测试完成 → 自动创建 test_report.json
                                 report_file = os.path.join(project_path, "test_report.json")
-                                if parsed_result.get("success"):
+                                if parsed.get("success"):
                                     report = {"status": "pass"}
                                 else:
-                                    # 测试失败
-                                    stderr = parsed_result.get("stderr", "")
-                                    sys.stderr.write(f"❌ 测试失败\n")
-                                    report = {"status": "fail", "error": stderr[:500]}
+                                    stderr = parsed.get("stderr", "") 
+                                    report = {
+                                        "status": "fail",
+                                        "error": stderr[:2000],
+                                        "full_stderr": stderr,
+                                        "full_stdout": parsed.get("stdout", "")[:2000]
+                                    }
 
                                 write_shared_file(project_path, "test_report.json", report)
                                 try:
