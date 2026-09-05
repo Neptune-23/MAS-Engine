@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  # MAS-Engine 核心服务
+  mas-engine:
+    build: .
+    container_name: mas-engine-core
+    environment:
+      - DB_HOST=db
+      - DB_PORT=3306
+      - DB_USER=root
+      - DB_PASSWORD=secret
+      - DB_NAME=agent_db
+      - CACHE_TTL=5
+      - MAX_HEALING_RETRIES=3
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./trajectories:/app/trajectories
+      - ./logs:/app/logs
+    command: pytest -v
+
+  # 独立的隔离数据库环境
+  db:
+    image: mysql:8.0
+    container_name: mas-engine-db
+    environment:
+      MYSQL_ROOT_PASSWORD: secret
+      MYSQL_DATABASE: agent_db
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-psecret"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

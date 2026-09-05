@@ -1,0 +1,58 @@
+# pyproject.toml
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mas-engine"
+version = "0.2.0"
+description = "Deterministic Multi-Agent System Engine with FastMCP and AST-based Self-Healing"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Li Tianhao", email = "yinl50175@gmail.com" }
+]
+dependencies = [
+    "fastmcp>=0.1.0",
+    "pymysql>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "uvicorn>=0.20.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
+    "mypy>=1.9.0"
+]
+
+[project.scripts]
+mas-engine = "mcp_server.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mcp_server*", "tools*", "utils*", "config*"]
+
+# ============================================================
+# 现代化代码质检配置 (Ruff) - 杜绝 100% 的缩进与未定义变量错误
+# ============================================================
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors (语法与缩进错误)
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes (未定义变量、未用导入)
+    "I",   # isort (导入自动排序)
+    "B",   # flake8-bugbear (常见设计 Bug)
+]
+ignore = ["E501", "E402", "B904"]  # 忽略超长行
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

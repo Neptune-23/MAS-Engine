@@ -1,9 +1,9 @@
-import time
 import json
 import os
 import sys
-from typing import Optional, Dict, Any
+import time
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 try:
     import pymysql
@@ -12,6 +12,7 @@ except ImportError:
 
 try:
     from dotenv import load_dotenv
+
     env_path = Path(__file__).parent.parent / ".env"
     if env_path.exists():
         load_dotenv(env_path)
@@ -73,7 +74,7 @@ class TaskStateMachine:
             database=self.database,
             charset=self.charset,
             autocommit=True,
-            connect_timeout=5
+            connect_timeout=5,
         )
 
     def _ensure_table(self):
@@ -102,14 +103,13 @@ class TaskStateMachine:
 
     def _get_from_db(self, task_id: str):
         if not self._db_available:
-            _log(f"_get_from_db: _db_available=False，跳过查询")
+            _log("_get_from_db: _db_available=False，跳过查询")
             return None
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT current_state, context FROM task_states WHERE task_id = %s",
-                (task_id,)
+                "SELECT current_state, context FROM task_states WHERE task_id = %s", (task_id,)
             )
             row = cursor.fetchone()
             conn.close()
@@ -131,7 +131,9 @@ class TaskStateMachine:
             return None
 
     def _update_db(self, task_id: str, state: str, context: Dict[str, Any]):
-        _log(f"_update_db 被调用: task_id={task_id}, state={state}, _db_available={self._db_available}")
+        _log(
+            f"_update_db 被调用: task_id={task_id}, state={state}, _db_available={self._db_available}"
+        )
         if not self._db_available:
             _log("_db_available=False，跳过写入")
             return False
@@ -143,10 +145,7 @@ class TaskStateMachine:
                      ON DUPLICATE KEY UPDATE
                      current_state = VALUES(current_state),
                      context = VALUES(context)"""
-            cursor.execute(
-                sql,
-                (task_id, state, json.dumps(context, ensure_ascii=False))
-            )
+            cursor.execute(sql, (task_id, state, json.dumps(context, ensure_ascii=False)))
             _log(f"SQL 执行成功，影响行数: {cursor.rowcount}")
             conn.close()
             return True
@@ -172,7 +171,7 @@ class TaskStateMachine:
         self._cache[task_id] = {
             "state": result["current_state"],
             "context": result.get("context", {}),
-            "timestamp": time.time()
+            "timestamp": time.time(),
         }
         return result
 
@@ -180,11 +179,7 @@ class TaskStateMachine:
         context = context or {}
         _log(f"update_task_state 被调用: task_id={task_id}, state={state}")
         success = self._update_db(task_id, state, context)
-        self._cache[task_id] = {
-            "state": state,
-            "context": context,
-            "timestamp": time.time()
-        }
+        self._cache[task_id] = {"state": state, "context": context, "timestamp": time.time()}
         _log(f"update_task_state 完成, success={success}")
         return success
 
@@ -205,5 +200,79 @@ class TaskStateMachine:
             "db_available": self._db_available,
             "db_error": self._db_error,
             "cache_size": len(self._cache),
-            "cache_ttl": self._cache_ttl
+            "cache_ttl": self._cache_ttl,
         }
+
+    # ============================================================
+    # 自反思与状态合法性流转扩展
+    # ============================================================
+    def record_healing_attempt(
+        self, task_id: str, patch_code: str, error_type: str, error_detail: str
+    ):
+        """记录一次自愈失败尝试到 Task Context 中"""
+        task_data = self.get_task_state(task_id) or {
+            "current_state": AgentState.SELF_HEALING,
+            "context": {},
+        }
+        ctx = task_data.get("context", {})
+        attempts = ctx.get("healing_attempts", [])
+
+        attempts.append(
+            {
+                "attempt": len(attempts) + 1,
+                "error_type": error_type,
+                "error_detail": error_detail[:400],
+                "timestamp": time.time(),
+            }
+        )
+        ctx["healing_attempts"] = attempts
+
+        # 如果达到 3 次重试仍未解决，可自动转入 HUMAN_INTERRUPT（人工介入）状态
+        if len(attempts) >= 3:
+            _log(f"Task {task_id} 自愈重试达到上限，转为 HUMAN_INTERRUPT")
+            self.update_task_state(task_id, AgentState.HUMAN_INTERRUPT, ctx)
+        else:
+            self.update_task_state(task_id, AgentState.SELF_HEALING, ctx)
+        return len(attempts)
+
+    def can_transition_to(self, current_state: str, target_state: str) -> bool:
+        """定义合法的状态流转图，防止状态乱跳"""
+        ALLOWED_TRANSITIONS = {
+            AgentState.REQUIREMENT_EXTRACTION: [
+                AgentState.REQUIREMENT_ANALYSIS,
+                AgentState.HUMAN_INTERRUPT,
+            ],
+            AgentState.REQUIREMENT_ANALYSIS: [
+                AgentState.RESOURCE_LOADING,
+                AgentState.HUMAN_INTERRUPT,
+            ],
+            AgentState.RESOURCE_LOADING: [AgentState.CODE_CONSTRUCTION, AgentState.HUMAN_INTERRUPT],
+            AgentState.CODE_CONSTRUCTION: [
+                AgentState.WEB_TESTING,
+                AgentState.SELF_HEALING,
+                AgentState.HUMAN_INTERRUPT,
+            ],
+            AgentState.WEB_TESTING: [
+                AgentState.DELIVERY_COMPLETED,
+                AgentState.SELF_HEALING,
+                AgentState.HUMAN_INTERRUPT,
+            ],
+            AgentState.SELF_HEALING: [
+                AgentState.FIX_APPLY,
+                AgentState.HUMAN_INTERRUPT,
+                AgentState.WEB_TESTING,
+            ],
+            AgentState.FIX_APPLY: [
+                AgentState.WEB_TESTING,
+                AgentState.SELF_HEALING,
+                AgentState.HUMAN_INTERRUPT,
+            ],
+            AgentState.HUMAN_INTERRUPT: [
+                AgentState.CODE_CONSTRUCTION,
+                AgentState.SELF_HEALING,
+                AgentState.DELIVERY_COMPLETED,
+            ],
+            AgentState.DELIVERY_COMPLETED: [],
+        }
+        allowed = ALLOWED_TRANSITIONS.get(current_state, [])
+        return target_state in allowed

@@ -1,0 +1,10 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+*.bat
+*.ps1
+logs/*
+!logs/.gitkeep

@@ -1,6 +1,11 @@
+import ast
 import json
-from pathlib import Path
+import os
+import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
 
 def batch_fix_console_logs_impl(file_paths: list, dry_run: bool = True) -> str:
     """批量修复 console.log 的实现"""
@@ -23,17 +28,24 @@ def batch_fix_console_logs_impl(file_paths: list, dry_run: bool = True) -> str:
         if "console.log" not in content:
             return {"file": str(path), "status": "skipped", "reason": "无 console.log"}
 
-        lines = content.split('\n')
+        lines = content.split("\n")
         new_lines = []
         modified = False
         for line in lines:
-            if 'console.log' in line and 'import.meta.env' not in line:
+            if "console.log" in line and "import.meta.env" not in line:
                 stripped = line.lstrip()
-                indent = line[:len(line)-len(stripped)]
-                if stripped.startswith('console.log'):
-                    new_line = indent + 'if (import.meta.env.MODE !== "production") {\n' + \
-                               indent + '    ' + stripped + '\n' + \
-                               indent + '}'
+                indent = line[: len(line) - len(stripped)]
+                if stripped.startswith("console.log"):
+                    new_line = (
+                        indent
+                        + 'if (import.meta.env.MODE !== "production") {\n'
+                        + indent
+                        + "    "
+                        + stripped
+                        + "\n"
+                        + indent
+                        + "}"
+                    )
                     new_lines.append(new_line)
                     modified = True
                 else:
@@ -44,7 +56,7 @@ def batch_fix_console_logs_impl(file_paths: list, dry_run: bool = True) -> str:
         if not modified:
             return {"file": str(path), "status": "skipped", "reason": "未找到可修复的 console.log"}
 
-        new_content = '\n'.join(new_lines)
+        new_content = "\n".join(new_lines)
 
         if dry_run:
             return {"file": str(path), "status": "preview", "diff": new_content[:500] + "..."}
@@ -63,9 +75,13 @@ def batch_fix_console_logs_impl(file_paths: list, dry_run: bool = True) -> str:
             elif result["status"] == "skipped":
                 skipped_count += 1
 
-    report = f"📊 批量修复完成。总文件数: {total_files}，已修复: {fixed_count}，跳过: {skipped_count}\n"
+    report = (
+        f"📊 批量修复完成。总文件数: {total_files}，已修复: {fixed_count}，跳过: {skipped_count}\n"
+    )
     if dry_run:
-        report += "⚠️ 当前为预览模式（dry_run=True），未实际修改文件。如需执行，请设置 dry_run=False。\n"
+        report += (
+            "⚠️ 当前为预览模式（dry_run=True），未实际修改文件。如需执行，请设置 dry_run=False。\n"
+        )
     report += "详细结果：\n"
     for r in results:
         if r["status"] == "fixed":
@@ -96,18 +112,20 @@ def batch_fix_backend_issues_impl(file_paths: list, dry_run: bool = True) -> str
 
         if "controller" in str(path).lower():
             if "echo " in content or "dump(" in content:
-                lines = content.split('\n')
+                lines = content.split("\n")
                 new_lines = []
                 for line in lines:
                     if "echo " in line or "dump(" in line:
-                        new_lines.append("        return $this->success('操作成功'); // 原 echo/dump 已替换")
+                        new_lines.append(
+                            "        return $this->success('操作成功'); // 原 echo/dump 已替换"
+                        )
                         modified = True
                     else:
                         new_lines.append(line)
-                content = '\n'.join(new_lines)
+                content = "\n".join(new_lines)
 
         if "die" in content or "exit" in content:
-            lines = content.split('\n')
+            lines = content.split("\n")
             new_lines = []
             for line in lines:
                 if "die" in line or "exit" in line:
@@ -115,10 +133,10 @@ def batch_fix_backend_issues_impl(file_paths: list, dry_run: bool = True) -> str
                     modified = True
                 else:
                     new_lines.append(line)
-            content = '\n'.join(new_lines)
+            content = "\n".join(new_lines)
 
         if "password" in content.lower() and "env(" not in content:
-            lines = content.split('\n')
+            lines = content.split("\n")
             new_lines = []
             for line in lines:
                 if "password" in line.lower() and "env" not in line:
@@ -126,7 +144,7 @@ def batch_fix_backend_issues_impl(file_paths: list, dry_run: bool = True) -> str
                     modified = True
                 else:
                     new_lines.append(line)
-            content = '\n'.join(new_lines)
+            content = "\n".join(new_lines)
 
         if not modified:
             results.append(f"⏭️ {path} 无需修改")
@@ -139,7 +157,66 @@ def batch_fix_backend_issues_impl(file_paths: list, dry_run: bool = True) -> str
         else:
             results.append(f"👁️ {path} 预览修改（未实际修改）")
 
-    report = f"📊 后端批量修复完成。\n" + "\n".join(results)
+    report = "📊 后端批量修复完成。\n" + "\n".join(results)
     if dry_run:
         report += "\n⚠️ 预览模式，未实际修改。设置 dry_run=False 执行修复。"
     return report
+
+
+# ============================================================
+# 3. 语法安全校验门禁（在真正写入前拦截语法错误）
+# ============================================================
+def validate_code_syntax(file_path: str, code_content: str) -> tuple[bool, str]:
+    """
+    静态语法校验器：支持 Python、PHP、JSON 等
+    返回: (is_valid: bool, error_message: str)
+    """
+    ext = Path(file_path).suffix.lower()
+
+    # 1. Python AST 语法树解析
+    if ext == ".py":
+        try:
+            ast.parse(code_content)
+            return True, ""
+        except SyntaxError as e:
+            return False, f"Python SyntaxError at line {e.lineno}: {e.msg}\n  --> {e.text}"
+
+    # 2. JSON 格式校验
+    elif ext == ".json":
+        try:
+            json.loads(code_content)
+            return True, ""
+        except json.JSONDecodeError as e:
+            return False, f"JSONDecodeError: {e.msg} at line {e.lineno}"
+
+    # 3. PHP 语法校验 (php -l)
+    elif ext == ".php":
+        # 确保包含 <?php 标签以通过 php -l 检查
+        check_content = code_content.strip()
+        if not check_content.startswith("<?php") and not check_content.startswith("<?"):
+            check_content = "<?php\n" + check_content
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                suffix=".php", mode="w", delete=False, encoding="utf-8"
+            ) as f:
+                f.write(check_content)
+                tmp_path = f.name
+            res = subprocess.run(["php", "-l", tmp_path], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                return True, ""
+            err_msg = (res.stdout or res.stderr).replace(tmp_path, file_path).strip()
+            return False, f"PHP Lint Error: {err_msg}"
+        except FileNotFoundError:
+            # 本地未安装 php CLI 时降级检查花括号闭合
+            if check_content.count("{") != check_content.count("}"):
+                return False, "PHP 基础校验失败: 花括号 {} 不闭合"
+            return True, "Warning: PHP CLI not found, skipped syntax lint"
+        except Exception as e:
+            return True, f"Warning: PHP lint check error: {str(e)}"
+        finally:
+            if "tmp_path" in locals() and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    # 4. 其他文件默认通过
+    return True, ""

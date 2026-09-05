@@ -1,193 +1,247 @@
-**MCP-based Multi-Agent System orchestration engine with 7-stage state machine, progressive tool discovery, and self-healing automation.**
+# 📖 MAS-Engine 新手完全使用手册与实战教程
 
-[![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![MCP](https://img.shields.io/badge/MCP-1.11.0-green.svg)](https://modelcontextprotocol.io/)
+> **MAS-Engine** 是一套基于 **7 阶确定性有限状态机（FSM）** 和 **可插拔多语言适配器** 构建的自主智能体系统。支持全自动从 0 到 1 架构与代码生成（Coding Free），以及已有代码项目的自动化单测捕获与 AST 切片自愈修复。
 
 ---
 
-## 📖 简介
+## 目录
 
-MAS-Engine 是一套基于 **Model Context Protocol (MCP)** 构建的**系统级自主 Agent 工具链**。它旨在驱动 AI 完成从需求提取、代码构建、自动测试到自我修复的完整开发闭环。
-
-**全新升级：独立运行模式 (`--standalone`)**  
-无需依赖任何 IDE 或客户端，你可以直接通过命令行让 Agent 独立完成项目识别、构建步骤推理、命令执行、自诊断修复与闭环交付。已验证支持 **Rust** 和 **Node.js** 项目的端到端自动化构建。
-
----
-
-## ✨ 核心特性
-
-| 特性 | 说明 |
-|------|------|
-| 🎯 **7阶状态机编排** | `需求提取 → 分析 → 资源加载 → 代码构建 → Web测试 → 自我修复 → 交付完成` |
-| 🔧 **16个MCP工具矩阵** | 覆盖项目扫描、批量修复、异步流水线、网页审计等 |
-| 💰 **渐进式工具发现** | 通过元工具动态加载工具 Schema，Token 消耗降低 **85%** |
-| 👥 **6种角色协同** | `analyst / architect / developer / tester / reviewer / fixer` 按状态自动切换 |
-| 💬 **Agent间消息通信** | 支持角色间异步消息传递（`send_message` + `get_next_message`），实现协同闭环 |
-| 🚀 **独立运行模式 (`--standalone`)** | 脱离 Cline/IDE，单机命令行即可完成“感知 → 推理 → 执行 → 闭环”全流程 |
-| 🔄 **Self-Healing 自我修复** | 自动捕获命令执行异常，利用结构化规则库（`diagnostic_rules.json`）进行诊断匹配与热修复；已验证解决 Rust 链接器缺失等环境问题 |
-| 🧪 **双引擎测试闭环** | Playwright 静默监听 + 视觉验证，自动捕获 Console/Network 异常并截图 *（注：该功能需额外安装依赖，独立构建模式无需开启）* |
+- 一、 极速安装与环境配置
+- 二、 大模型后端准备（二选一）
+- 三、 常用命令大全（开箱即用新手教程）
+  - 场景 1：从 0 到 1 自动构建新项目（绿地模式 `--create`）
+  - 场景 2：已有项目一键排错与自愈（棕地模式 `--project`）
+  - 场景 3：挂载项目个性化规范（Pi-Style `AGENTS.md`）
+  - 场景 4：作为标准 MCP 服务供 IDE 调用（Cursor / Cline）
+  - 场景 5：自动化数据采集飞轮（产出 SFT / DPO 数据）
+  - 场景 6：代码质量检查与全量单元自测
+- 四、 命令行参数速查表
+- 五、 常见报错与排查指南 (FAQ)
 
 ---
 
-## 🚀 快速开始
+## 一、 极速安装与环境配置
 
-### 环境要求
+### 1. 克隆代码库并进入项目
 
-| 依赖 | 版本要求 |
-|------|----------|
-| Python | 3.11+ |
-| MySQL | 5.7+ |
-| Node.js | 16+（前端项目需要） |
-| PHP | 7.4+（后端/后台项目需要） |
-
-### 安装
-
-
+```bash
 git clone https://github.com/Neptune-23/mas-engine.git
-cd mas-engine/mcp-server
+cd mas-engine
+```
+
+### 2. 创建并激活虚拟环境（推荐 Python 3.10+）
+
+```powershell
+# Windows
 python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+.\venv\Scripts\activate
 
+# Linux / macOS / WSL
+python3 -m venv venv
+source venv/bin/activate
+```
 
-### 配置
+### 3. 一键以可编辑模式安装全部依赖
 
-复制环境变量模板并填入配置：
-cp .env.example .env
+```bash
+pip install -e ".[dev]"
+```
 
+### 4. 配置 `.env` 环境变量
 
-编辑 `.env` 文件：
+在项目根目录下创建 `.env` 文件：
 
-
+```ini
+# 数据库配置（用于状态机持久化与历史记忆）
 DB_HOST=127.0.0.1
+DB_PORT=3306
 DB_USER=root
-DB_PASSWORD=your_password
+DB_PASSWORD=0000
 DB_NAME=agent_db
-DEEPSEEK_API_KEY=your_key_here
 
+# 模型后端配置：本地 GPU 推理（推荐）或云端 API
+LLM_PROVIDER=local
+LOCAL_LLM_URL=http://127.0.0.1:8000/v1
+LOCAL_LLM_MODEL=mas-developer
 
-### 运行独立模式（建议使用）
+# 若使用云端 DeepSeek 兜底，取消下行注释并填入 Key
+# DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
+```
 
+---
 
-# 1. 分析 Rust 项目结构，自动执行构建
-python server.py --standalone --task "分析 D:/test_rust_project 项目结构，推理构建步骤，然后执行构建"
+## 二、 大模型后端准备（二选一）
 
-# 2. 分析 Node.js 项目结构，自动执行构建
-python server.py --standalone --task "分析 D:/test_node_project 项目结构，推理构建步骤，然后执行构建"
+MAS-Engine 支持 **本地单卡 GPU 专职模型** 或 **云端 API**：
 
+### 选项 A：使用本地 7B 多 LoRA 运行时（单卡 8GB 显存，推荐）
 
-### 启动 MCP 服务（供 Cline 等客户端调用）
+在 WSL2 终端中启动模型服务（显存常驻约 4.2GB，带并发排队锁）：
 
+```bash
+python /mnt/d/Python/Agent/LLM/serve_adapters.py
+```
 
-python server.py
+*启动后，服务将监听在 [http://127.0.0.1:8000](http://127.0.0.1:8000)，挂载 Architect / Developer / Tester / Fixer / Auditor 5 大专职适配器。*
 
+### 选项 B：使用云端 DeepSeek / OpenAI API
 
-## 🧠 工具矩阵
+直接在 `.env` 中修改：
 
-| 工具名 | 分类 | 说明 |
-|--------|------|------|
-| `search_tools` | 元工具 | 渐进式工具发现，按状态+角色动态过滤 |
-| `orchestrate_task` | 元工具 | 任务编排入口，自然语言驱动 |
-| `get_next_message` | 元工具 | Agent间通信收件箱 |
-| `create_frontend_project` | 模板 | 创建 Vue 3 + uni-app 项目 |
-| `create_backend_project` | 模板 | 创建 ThinkPHP 后端项目 |
-| `create_admin_project` | 模板 | 创建 FastAdmin 后台项目 |
-| `scan_code_batch` | 质量 | 分批代码扫描，避免超时 |
-| `run_quality_pipeline` | 流水线 | 全自动异步质量检查 |
-| `run_web_audit` | 测试 | Playwright 网页审计 |
-| `execute_shell_command` | 执行 | 系统级安全命令执行（白名单过滤） |
-| `get_rules` | 规则 | 获取多语言诊断规则（结构化 JSON） |
+```ini
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=你的DeepSeek_API_KEY
+```
 
+---
 
+## 三、 常用命令大全（开箱即用新手教程）
 
-## 🏗️ 架构设计及状态机流转
+### 场景 1：从 0 到 1 自动构建新项目（绿地模式 `--create`）
 
+> **适用场景**：你只有一个点子或一段话，需要 Agent 自主完成架构设计、模块规划、源文件编写并进行语法门禁自检。
 
-<img width="3492" height="3254" alt="deepseek_mermaid_20260816_ed83e8" src="https://github.com/user-attachments/assets/5d2b459e-d3cc-4ae4-b552-01022ccf6f95" />
+#### 1. 自动创建 Python 项目
 
+```powershell
+python mcp-server/server.py --create "D:\my_python_tool" --task "编写一个多线程批量图片压缩工具，包含参数解析和错误处理"
+```
 
+#### 2. 自动创建 PHP 项目（指定 `--lang php`）
 
+```powershell
+python mcp-server/server.py --create "D:\my_php_api" --lang php --task "编写一个简单的用户权限验证API，包含Token生成与检验"
+```
 
+执行后，MAS 会自动经历：
+`🧠 Architect (规划文件树) ➔ 💻 Developer (生成完整代码) ➔ 🧪 Tester (语法门禁自检) ➔ 🎉 Auditor (交付)`。
 
+---
 
-### 角色体系
+### 场景 2：已有项目一键排错与自愈（棕地模式 `--project`）
 
-| 角色 | 职责 |
-|------|------|
-| `analyst` | 需求分析与拆解 |
-| `architect` | 技术选型与资源加载 |
-| `developer` | 代码生成与构建 |
-| `tester` | 自动化测试与验证 |
-| `reviewer` | 代码审查与质量检查 |
-| `fixer` | 自动修复与回归验证 |
+> **适用场景**：本地有一个报错或单测通不过的项目，需要 Agent 自动定位根因并安全修补。
 
+#### 1. 一键诊断修复 Python 项目（自动探测）
 
-## 📌 版本说明
+```powershell
+python mcp-server/server.py --project "D:\my_work_project"
+```
 
-本仓库为 **开源演示版本**，展示 MAS-Engine 的核心框架能力：
+#### 2. 一键诊断修复 PHP 项目（自动探测并调用 PHPUnit）
 
-- ✅ 独立运行模式（`--standalone` 端到端构建闭环）
-- ✅ 状态机编排
-- ✅ MCP 工具调度
-- ✅ 多角色协同
-- ✅ 渐进式工具发现
-- ✅ Agent 间消息通信
-- ✅ 异步流水线
-- ✅ 网页自动化测试
+```powershell
+python mcp-server/server.py --project "D:\my_php_service"
+```
 
-完整版（包含业务模板、企业级配置、定制化规则）为闭源维护，仅用于内部开发。
+执行后，MAS 会自动经历：
+`🧪 Tester (物理执行 pytest/phpunit 捕获堆栈) ➔ 🔧 Fixer (AST 切片精准自愈) ➔ 🛡️ 语法门禁拦截 ➔ 🔄 回归验证 ➔ 🎉 交付`。
 
-## 🧭 技术方向：从单 Agent 到群体智能
+---
 
-MAS-Engine 的终极目标是 **“群体 Agent 自我演化”** —— 即多个 Agent 在协作中通过积累记忆和评估反馈，不断优化自身行为，形成类似人类团队的协同进化能力。
+### 场景 3：挂载项目个性化规范（Pi-Style `AGENTS.md`）
 
-当前阶段，我们已经实现了 **单 Agent 的独立构建闭环**（`--standalone` 模式），让单个 Agent 能够感知项目、推理构建、执行修复并交付成果。这是群体演化的“个体单元”基础。
+如果你希望 MAS-Engine 遵循你的团队专属开发规范（如必须使用特定框架、禁用某个函数）：
 
-接下来的演进路线将分为三层：
+只需在目标项目根目录下放一个 **`AGENTS.md`**：
 
-1. **个体智能 (已完成)**：单个 Agent 能够独立完成从需求到交付的完整生命周期，并具备基础的自诊断与修复能力。
-2. **协作智能 (进行中)**：多个角色（`developer`、`tester`、`reviewer` 等）通过消息通信形成轻量级协作网络，共同完成复杂任务。  
-   *（当前已支持 Agent 间消息传递 `send_message` + `get_next_message`）*
-3. **群体演化 (远期目标)**：建立共享记忆库（`memory_records` 表），让成功修复的经验被所有 Agent 复用；引入评估员 Agent 审核行为，通过强化反馈驱动集体行为优化，最终实现“经历即经验，经验即智慧”的自我演化闭环。
+```markdown
+# AGENTS.md
+- 代码中所有函数必须添加完整 Type Hints 类型注解。
+- 数据库操作必须使用 PDO 预处理语句，严禁字符串拼接 SQL。
+- 错误信息必须统一用中文输出。
+```
 
-## 🗺️ 路线图
+运行 `--create` 或 `--project` 时，系统会自动识别并注入：
+`📄 [Pi-Core] 已成功挂载项目专属 AGENTS.md 声明式规则`。
 
-| 版本 | 时间 | 核心内容 |
-|------|------|----------|
-| v1.0.0 | 2026.08 | **已发布**：状态机 + 工具矩阵 + 多语言独立构建闭环 |
-| v1.1.0 | 2026 Q3 | 通用指纹识别模块（`analyze_project_structure` 增强） |
-| v1.2.0 | 2026 Q4 | 基础自我演化能力（日志分析 + 经验复用） |
-| v2.0.0 | 2027 Q1 | 多 Agent 完整协作网络 + Web 管理界面 |
+---
 
+### 场景 4：作为标准 MCP 服务供 IDE 调用（Cursor / Cline）
 
-## 🤝 贡献
+如果你希望在 VS Code、Cursor 或 Cline 中把 MAS 当作底层工具箱：
 
-欢迎任何形式的贡献！
+#### 1. stdio 模式（供 VS Code / Cursor 插件子进程直接调用）
 
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
-3. 提交修改 (`git commit -m 'feat: add amazing feature'`)
-4. 推送分支 (`git push origin feature/amazing-feature`)
-5. 提交 Pull Request
+```powershell
+python mcp-server/server.py
+```
 
-请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 了解详细规范。
+#### 2. HTTP / SSE 模式（供远程或局域网客户端连接）
 
+```powershell
+python mcp-server/server.py --http
+```
 
-## 📄 许可证
+*将在 [http://0.0.0.0:8000](http://0.0.0.0:8000) 启动 SSE 协议服务。*
 
-本项目采用 **MIT License**，可自由使用、修改、分发，包括商业用途。详见 [LICENSE](LICENSE) 文件。
+---
 
+### 场景 5：自动化数据采集飞轮（产出 SFT / DPO 数据）
 
-## 👤 作者
+无需人工标注，自动将真实的编译器/单测报错与自愈成功的物理闭环转换成可直接微调大模型的数据集：
 
-**李天昊**
-- GitHub: [@Neptune-23](https://github.com/Neptune-23)
-- 技术方向：AI Agent基础设施、MCP协议、Multi-Agent System、Multi-Agent Evolve
+```powershell
+python scripts/generate_training_data.py
+```
 
+#### 输出产物：
 
-## ⭐ 支持
+- `dataset_sft.json`：符合 ShareGPT / ChatML 格式的微调训练集；
+- `dataset_dpo.json`：自动将重试失败作为 `rejected`、物理跑通作为 `chosen` 的强化学习偏好对。
 
-如果你觉得这个项目对你有帮助，请给它一个 Star！
+---
 
-你的 Star 是对作者最大的鼓励。❤️
+### 场景 6：代码质量检查与全量单元自测
+
+在对系统做任何改动后，执行以下命令验证底层确定性：
+
+```powershell
+# 1. 自动执行代码规范扫描与一键修复
+ruff check . --fix
+
+# 2. 自动格式化代码
+ruff format .
+
+# 3. 运行全量 10 项单元测试（涵盖状态机白名单、AST 切片降噪、反测试作弊等）
+pytest -v
+```
+
+*当终端显示 `10 passed` 且 `All checks passed!` 时，表示全系统 100% 健康。*
+
+---
+
+## 四、 命令行参数速查表
+
+| 参数选项 | 说明 | 示例 |
+| --- | --- | --- |
+| **`--create <目录>`** | **绿地构建**：从 0 到 1 自动创建新项目 | `--create "D:\new_app"` |
+| **`--project <目录>`** | **棕地维护**：对已有项目执行测试、诊断与自愈 | `--project "./test_sandbox"` |
+| **`--task "<需求>"`** | 指定要执行的自然语言任务描述 | `--task "创建一个计算器页面"` |
+| **`--lang <语言>`** | 显式装配专职语言适配器（`python` / `php`） | `--lang php` |
+| **`--standalone`** | 强制开启独立命令行运行模式 | `--standalone` |
+| **`--http`** | 启动 HTTP/SSE 模式的 MCP 服务器 | `--http` |
+
+---
+
+## 五、 常见报错与排查指南 (FAQ)
+
+### 1. 报错 `Connection error / 502 Bad Gateway`？
+
+- **原因**：本地网络代理软件（如 Clash、VPN）劫持了 `127.0.0.1` 端口。
+- **解决**：在代理软件设置中将 `127.0.0.1` 和 `localhost` 加入直连白名单，或在终端临时关闭代理。
+
+### 2. 报错 `No module named pytest` 或 `php: command not found`？
+
+- **解决**：
+  - Python 项目测试依赖：`pip install pytest`；
+  - PHP 项目运行依赖：确保系统已安装 PHP CLI 并在系统 PATH 中（运行 `php -v` 验证）。
+
+### 3. 提示 `⚠️ 达到最大迭代次数 (5)，任务失败`？
+
+- **原因**：Bug 较为复杂，Fixer 连续 3 次尝试修改后仍未通过单测，状态机自动触发熔断以防止死循环。
+- **排查**：打开项目目录下的 `test_report.json`，查看未通过的详细断言与堆栈信息。
+
+### 4. 出现语法门禁拦截 `⚠️ AST 语法门禁拦截无效修复`？
+
+- **说明**：这是系统的物理安全保护机制在起作用，表明大模型生成的代码存在语法破损，系统已自动拦截并防止损坏原工程文件。

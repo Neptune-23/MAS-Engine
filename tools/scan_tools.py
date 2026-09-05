@@ -1,6 +1,6 @@
 import subprocess
-import json
 from pathlib import Path
+
 
 def scan_code_batch_impl(project_path: str, offset: int = 0, limit: int = 20) -> str:
     """分批扫描前端代码的实现"""
@@ -21,7 +21,7 @@ def scan_code_batch_impl(project_path: str, offset: int = 0, limit: int = 20) ->
     all_files = [f for f in all_files if "node_modules" not in str(f)]
 
     total = len(all_files)
-    batch_files = all_files[offset:offset + limit]
+    batch_files = all_files[offset : offset + limit]
 
     if not batch_files:
         return f"✅ 所有文件已检查完毕！共扫描了 {total} 个文件。"
@@ -35,7 +35,9 @@ def scan_code_batch_impl(project_path: str, offset: int = 0, limit: int = 20) ->
             if "console.log" in content and "import.meta.env" not in content:
                 for i, line in enumerate(lines, 1):
                     if "console.log" in line:
-                        issues.append(f"  📍 {file.relative_to(path)}: 第 {i} 行 - console.log 未加环境判断")
+                        issues.append(
+                            f"  📍 {file.relative_to(path)}: 第 {i} 行 - console.log 未加环境判断"
+                        )
                         break
 
             if "data()" in content and "<script setup" not in content:
@@ -81,7 +83,7 @@ def scan_backend_batch_impl(project_path: str, offset: int = 0, limit: int = 20)
     all_files = sorted(set(all_files), key=lambda p: str(p))
 
     total = len(all_files)
-    batch_files = all_files[offset:offset + limit]
+    batch_files = all_files[offset : offset + limit]
 
     if not batch_files:
         return f"✅ 所有文件已检查完毕！共扫描了 {total} 个 PHP 文件。"
@@ -95,16 +97,22 @@ def scan_backend_batch_impl(project_path: str, offset: int = 0, limit: int = 20)
             if "password" in content.lower() and "env(" not in content and "getenv(" not in content:
                 for i, line in enumerate(lines, 1):
                     if "password" in line.lower() and "env" not in line:
-                        issues.append(f"  📍 {file.relative_to(path)}: 第 {i} 行 - 疑似硬编码密码/密钥（建议使用 .env）")
+                        issues.append(
+                            f"  📍 {file.relative_to(path)}: 第 {i} 行 - 疑似硬编码密码/密钥（建议使用 .env）"
+                        )
                         break
 
             if "Db::query" in content or "Db::execute" in content:
                 if "::query" in content and "?" not in content and ":" not in content:
-                    issues.append(f"  📍 {file.relative_to(path)} - 使用了 Db::query 但疑似未使用参数绑定")
+                    issues.append(
+                        f"  📍 {file.relative_to(path)} - 使用了 Db::query 但疑似未使用参数绑定"
+                    )
 
             if "echo " in content or "dump(" in content or "var_dump(" in content:
                 if "controller" in str(file).lower() or "api" in str(file).lower():
-                    issues.append(f"  📍 {file.relative_to(path)} - 控制器/API 中不应使用 echo/dump/var_dump")
+                    issues.append(
+                        f"  📍 {file.relative_to(path)} - 控制器/API 中不应使用 echo/dump/var_dump"
+                    )
 
             if "input(" in content and "validate" not in content:
                 issues.append(f"  📍 {file.relative_to(path)} - 使用了 input() 但未发现验证器")
@@ -116,7 +124,9 @@ def scan_backend_batch_impl(project_path: str, offset: int = 0, limit: int = 20)
     next_offset = offset + limit
     has_more = total > next_offset
 
-    report = f"📊 后端扫描进度：{next_offset if next_offset < total else total}/{total} 个 PHP 文件\n"
+    report = (
+        f"📊 后端扫描进度：{next_offset if next_offset < total else total}/{total} 个 PHP 文件\n"
+    )
     if issues:
         report += f"🚨 本批次发现 {len(issues)} 个问题：\n" + "\n".join(issues)
     else:
@@ -148,7 +158,7 @@ def scan_admin_batch_impl(project_path: str, offset: int = 0, limit: int = 20) -
     all_files = sorted(set(all_files), key=lambda p: str(p))
 
     total = len(all_files)
-    batch_files = all_files[offset:offset + limit]
+    batch_files = all_files[offset : offset + limit]
 
     if not batch_files:
         return f"✅ 所有文件已检查完毕！共扫描了 {total} 个 PHP 文件。"
@@ -168,21 +178,29 @@ def scan_admin_batch_impl(project_path: str, offset: int = 0, limit: int = 20) -
                 for i, line in enumerate(lines, 1):
                     if "==" in line and ("admin" in line or "is_admin" in line or "role" in line):
                         if "config" not in line and "auth" not in line:
-                            issues.append(f"  📍 {file.relative_to(path)}: 第 {i} 行 - 疑似硬编码权限判断")
+                            issues.append(
+                                f"  📍 {file.relative_to(path)}: 第 {i} 行 - 疑似硬编码权限判断"
+                            )
                             break
 
             if "Db::query" in content or "Db::execute" in content:
                 if "bind" not in content and "?" not in content:
-                    issues.append(f"  📍 {file.relative_to(path)} - 使用了 Db::query 但疑似未使用参数绑定")
+                    issues.append(
+                        f"  📍 {file.relative_to(path)} - 使用了 Db::query 但疑似未使用参数绑定"
+                    )
 
             if "src=" in content or "href=" in content:
                 if "__PUBLIC__" not in content and "asset(" not in content and "cdn" not in content:
-                    issues.append(f"  📍 {file.relative_to(path)} - 前端资源路径未使用 __PUBLIC__ 或 asset()")
+                    issues.append(
+                        f"  📍 {file.relative_to(path)} - 前端资源路径未使用 __PUBLIC__ 或 asset()"
+                    )
 
     next_offset = offset + limit
     has_more = total > next_offset
 
-    report = f"📊 后台扫描进度：{next_offset if next_offset < total else total}/{total} 个 PHP 文件\n"
+    report = (
+        f"📊 后台扫描进度：{next_offset if next_offset < total else total}/{total} 个 PHP 文件\n"
+    )
     if issues:
         report += f"🚨 本批次发现 {len(issues)} 个问题：\n" + "\n".join(issues)
     else:
@@ -215,8 +233,12 @@ def run_code_check_impl(project_path: str) -> str:
 
     try:
         result = subprocess.run(
-            ["npx", "prettier", "--check", "\"{pages,sheep,components}/**/*.{js,json,vue,html}\""],
-            capture_output=True, text=True, cwd=project_path, shell=True, timeout=60
+            ["npx", "prettier", "--check", '"{pages,sheep,components}/**/*.{js,json,vue,html}"'],
+            capture_output=True,
+            text=True,
+            cwd=project_path,
+            shell=True,
+            timeout=60,
         )
         if result.returncode == 0:
             return f"✅ 代码规范检查通过！\n{result.stdout}"
@@ -248,7 +270,9 @@ def check_code_quality_impl(project_path: str, auto_fix: bool = False) -> str:
 
             for i, line in enumerate(lines, 1):
                 if "console.log" in line and "import.meta.env" not in content:
-                    issues.append(f"  📍 {file.relative_to(path)}: 第 {i} 行 - console.log 未加环境判断")
+                    issues.append(
+                        f"  📍 {file.relative_to(path)}: 第 {i} 行 - console.log 未加环境判断"
+                    )
                     break
 
             if "data()" in content and "script setup" not in content:
@@ -261,8 +285,12 @@ def check_code_quality_impl(project_path: str, auto_fix: bool = False) -> str:
 
     try:
         prettier_result = subprocess.run(
-            ["npx", "prettier", "--check", "\"{pages,sheep,components}/**/*.{js,json,vue,html}\""],
-            capture_output=True, text=True, cwd=project_path, shell=True, timeout=120
+            ["npx", "prettier", "--check", '"{pages,sheep,components}/**/*.{js,json,vue,html}"'],
+            capture_output=True,
+            text=True,
+            cwd=project_path,
+            shell=True,
+            timeout=120,
         )
         if prettier_result.returncode != 0:
             issues.append(f"\n📦 Prettier 格式问题：\n{prettier_result.stdout}")
@@ -277,10 +305,19 @@ def check_code_quality_impl(project_path: str, auto_fix: bool = False) -> str:
     if auto_fix:
         try:
             subprocess.run(
-                ["npx", "prettier", "--write", "\"{pages,sheep,components}/**/*.{js,json,vue,html}\""],
-                capture_output=True, text=True, cwd=project_path, shell=True, timeout=120
+                [
+                    "npx",
+                    "prettier",
+                    "--write",
+                    '"{pages,sheep,components}/**/*.{js,json,vue,html}"',
+                ],
+                capture_output=True,
+                text=True,
+                cwd=project_path,
+                shell=True,
+                timeout=120,
             )
-            report += f"\n\n✅ 已自动执行 Prettier 格式化修复。"
+            report += "\n\n✅ 已自动执行 Prettier 格式化修复。"
         except Exception as e:
             report += f"\n\n❌ 自动修复失败：{str(e)}"
 

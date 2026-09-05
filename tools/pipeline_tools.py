@@ -1,12 +1,18 @@
-import subprocess
-import threading
-import uuid
-import time
 import json
 import re
-from pathlib import Path
+import subprocess
+import threading
+import time
+import uuid
 from datetime import datetime
-#from playwright.sync_api import sync_playwright
+from pathlib import Path
+
+# from playwright.sync_api import sync_playwright
+
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None
 
 # 这些变量将在 server.py 中注入
 pipeline_tasks = None
@@ -18,8 +24,15 @@ send_message = None
 LOG_DIR = None
 
 
-def init_pipeline_tools(pipeline_tasks_dict, task_lock_obj, logger_obj,
-                        state_machine_obj, agent_state_cls, send_msg_func, log_dir):
+def init_pipeline_tools(
+    pipeline_tasks_dict,
+    task_lock_obj,
+    logger_obj,
+    state_machine_obj,
+    agent_state_cls,
+    send_msg_func,
+    log_dir,
+):
     """注入依赖"""
     global pipeline_tasks, task_lock, logger, state_machine, AgentState, send_message, LOG_DIR
     pipeline_tasks = pipeline_tasks_dict
@@ -48,7 +61,7 @@ def run_quality_pipeline_impl(project_path: str, fix: bool = False) -> str:
             "error": None,
             "progress": "任务已创建，等待启动...",
             "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
+            "updated_at": datetime.now().isoformat(),
         }
 
     def worker():
@@ -58,8 +71,8 @@ def run_quality_pipeline_impl(project_path: str, fix: bool = False) -> str:
                 pipeline_tasks[task_id]["progress"] = "开始执行流水线..."
                 pipeline_tasks[task_id]["updated_at"] = datetime.now().isoformat()
 
-            from tools.scan_tools import scan_code_batch_impl
             from tools.fix_tools import batch_fix_console_logs_impl
+            from tools.scan_tools import scan_code_batch_impl
 
             path_obj = Path(project_path)
             all_issues = []
@@ -73,30 +86,32 @@ def run_quality_pipeline_impl(project_path: str, fix: bool = False) -> str:
                     all_issues.append(batch_result)
                     break
                 all_issues.append(batch_result)
-                match = re.search(r'offset=(\d+)', batch_result)
+                match = re.search(r"offset=(\d+)", batch_result)
                 if match:
                     offset = int(match.group(1))
                 else:
                     break
 
             for issue in all_issues:
-                match = re.search(r'(\d+)/(\d+)', issue)
+                match = re.search(r"(\d+)/(\d+)", issue)
                 if match:
                     total_files = int(match.group(2))
                     break
 
             console_log_files = []
             for issue in all_issues:
-                lines = issue.split('\n')
+                lines = issue.split("\n")
                 for line in lines:
-                    if 'console.log' in line and ('.vue' in line or '.js' in line):
-                        match = re.search(r'📍 (.+?):', line)
+                    if "console.log" in line and (".vue" in line or ".js" in line):
+                        match = re.search(r"📍 (.+?):", line)
                         if match:
                             console_log_files.append(match.group(1))
             console_log_files = list(set(console_log_files))
 
             with task_lock:
-                pipeline_tasks[task_id]["progress"] = f"扫描完成，发现 {len(console_log_files)} 个含 console.log 的文件"
+                pipeline_tasks[task_id]["progress"] = (
+                    f"扫描完成，发现 {len(console_log_files)} 个含 console.log 的文件"
+                )
                 pipeline_tasks[task_id]["updated_at"] = datetime.now().isoformat()
 
             fix_log = []
@@ -111,7 +126,7 @@ def run_quality_pipeline_impl(project_path: str, fix: bool = False) -> str:
                         cwd=project_path,
                         shell=True,
                         timeout=120,
-                        capture_output=True
+                        capture_output=True,
                     )
                     fix_log.append("✅ 已执行 Prettier 格式化")
                 except Exception as e:
@@ -159,7 +174,7 @@ def run_quality_pipeline_impl(project_path: str, fix: bool = False) -> str:
 📁 项目路径：{project_path}
 📄 总文件数：{total_files}
 🚨 发现问题文件数：{len(console_log_files)}
-📊 修复操作：{'已执行' if fix else '未开启'}
+📊 修复操作：{"已执行" if fix else "未开启"}
 
 📄 完整报告已保存至：{report_file}
 💡 如需查看详情，请打开该文件。
@@ -175,9 +190,11 @@ def run_quality_pipeline_impl(project_path: str, fix: bool = False) -> str:
                 from_role="fixer",
                 to_role="tester",
                 action="reverify",
-                payload={"project_path": project_path, "task_id": task_id}
+                payload={"project_path": project_path, "task_id": task_id},
             )
-            state_machine.update_task_state(task_id, AgentState.WEB_TESTING, {"last_pipeline": task_id})
+            state_machine.update_task_state(
+                task_id, AgentState.WEB_TESTING, {"last_pipeline": task_id}
+            )
             logger.info(f"流水线 {task_id} 完成，已通知测试 Agent")
             logger.info(f"流水线任务 {task_id} 完成，报告保存至 {report_file}")
 
@@ -212,7 +229,7 @@ def run_backend_pipeline_impl(project_path: str, fix: bool = False) -> str:
             "error": None,
             "progress": "后端任务已创建，等待启动...",
             "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
+            "updated_at": datetime.now().isoformat(),
         }
 
     def worker():
@@ -222,8 +239,8 @@ def run_backend_pipeline_impl(project_path: str, fix: bool = False) -> str:
                 pipeline_tasks[task_id]["progress"] = "开始执行后端扫描..."
                 pipeline_tasks[task_id]["updated_at"] = datetime.now().isoformat()
 
-            from tools.scan_tools import scan_backend_batch_impl
             from tools.fix_tools import batch_fix_backend_issues_impl
+            from tools.scan_tools import scan_backend_batch_impl
 
             all_issues = []
             total_files = 0
@@ -236,30 +253,32 @@ def run_backend_pipeline_impl(project_path: str, fix: bool = False) -> str:
                     all_issues.append(batch_result)
                     break
                 all_issues.append(batch_result)
-                match = re.search(r'offset=(\d+)', batch_result)
+                match = re.search(r"offset=(\d+)", batch_result)
                 if match:
                     offset = int(match.group(1))
                 else:
                     break
 
             for issue in all_issues:
-                match = re.search(r'(\d+)/(\d+)', issue)
+                match = re.search(r"(\d+)/(\d+)", issue)
                 if match:
                     total_files = int(match.group(2))
                     break
 
             problem_files = []
             for issue in all_issues:
-                lines = issue.split('\n')
+                lines = issue.split("\n")
                 for line in lines:
-                    if '📍' in line:
-                        match = re.search(r'📍 (.+?):', line)
+                    if "📍" in line:
+                        match = re.search(r"📍 (.+?):", line)
                         if match:
                             problem_files.append(match.group(1))
             problem_files = list(set(problem_files))
 
             with task_lock:
-                pipeline_tasks[task_id]["progress"] = f"扫描完成，发现 {len(problem_files)} 个有问题的文件"
+                pipeline_tasks[task_id]["progress"] = (
+                    f"扫描完成，发现 {len(problem_files)} 个有问题的文件"
+                )
                 pipeline_tasks[task_id]["updated_at"] = datetime.now().isoformat()
 
             fix_log = []
@@ -282,7 +301,7 @@ def run_backend_pipeline_impl(project_path: str, fix: bool = False) -> str:
                 for f in problem_files[:20]:
                     report += f"  - {f}\n"
                 if len(problem_files) > 20:
-                    report += f"  ... 还有 {len(problem_files)-20} 个\n"
+                    report += f"  ... 还有 {len(problem_files) - 20} 个\n"
             else:
                 report += "✅ 未发现问题\n"
 
@@ -327,7 +346,7 @@ def run_admin_pipeline_impl(project_path: str, fix: bool = False) -> str:
             "error": None,
             "progress": "后台任务已创建，等待启动...",
             "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
+            "updated_at": datetime.now().isoformat(),
         }
 
     def worker():
@@ -350,30 +369,32 @@ def run_admin_pipeline_impl(project_path: str, fix: bool = False) -> str:
                     all_issues.append(batch_result)
                     break
                 all_issues.append(batch_result)
-                match = re.search(r'offset=(\d+)', batch_result)
+                match = re.search(r"offset=(\d+)", batch_result)
                 if match:
                     offset = int(match.group(1))
                 else:
                     break
 
             for issue in all_issues:
-                match = re.search(r'(\d+)/(\d+)', issue)
+                match = re.search(r"(\d+)/(\d+)", issue)
                 if match:
                     total_files = int(match.group(2))
                     break
 
             problem_files = []
             for issue in all_issues:
-                lines = issue.split('\n')
+                lines = issue.split("\n")
                 for line in lines:
-                    if '📍' in line:
-                        match = re.search(r'📍 (.+?):', line)
+                    if "📍" in line:
+                        match = re.search(r"📍 (.+?):", line)
                         if match:
                             problem_files.append(match.group(1))
             problem_files = list(set(problem_files))
 
             with task_lock:
-                pipeline_tasks[task_id]["progress"] = f"扫描完成，发现 {len(problem_files)} 个有问题的文件"
+                pipeline_tasks[task_id]["progress"] = (
+                    f"扫描完成，发现 {len(problem_files)} 个有问题的文件"
+                )
                 pipeline_tasks[task_id]["updated_at"] = datetime.now().isoformat()
 
             fix_log = []
@@ -394,7 +415,7 @@ def run_admin_pipeline_impl(project_path: str, fix: bool = False) -> str:
                 for f in problem_files[:20]:
                     report += f"  - {f}\n"
                 if len(problem_files) > 20:
-                    report += f"  ... 还有 {len(problem_files)-20} 个\n"
+                    report += f"  ... 还有 {len(problem_files) - 20} 个\n"
             else:
                 report += "✅ 未发现问题\n"
 
@@ -451,8 +472,8 @@ def get_pipeline_status_impl(task_id: str) -> str:
 def run_web_audit_impl(task_id: str, url: str, wait_time: int = 3) -> str:
     """网页审计的实现"""
     task_data = state_machine.get_task_state(task_id)
-    if task_data and task_data.get('current_state'):
-        current_state = task_data['current_state']
+    if task_data and task_data.get("current_state"):
+        current_state = task_data["current_state"]
         if current_state not in [AgentState.WEB_TESTING, AgentState.SELF_HEALING]:
             return f"⛔ [状态机拦截] 越权操作！当前处于【{current_state}】阶段。必须流转至 WEB_TESTING 阶段方可执行网页测试。"
 
@@ -464,17 +485,33 @@ def run_web_audit_impl(task_id: str, url: str, wait_time: int = 3) -> str:
         "page_title": "",
         "console_errors": [],
         "network_errors": [],
-        "screenshot_path": ""
+        "screenshot_path": "",
     }
 
+    if sync_playwright is None:
+        return json.dumps({"error": "未安装 playwright 依赖，无法执行网页审计"}, ensure_ascii=False)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            context = browser.new_context(viewport={'width': 1280, 'height': 720})
+            context = browser.new_context(viewport={"width": 1280, "height": 720})
             page = context.new_page()
 
-            page.on("console", lambda msg: diagnostics["console_errors"].append(f"[{msg.type}] {msg.text}") if msg.type == "error" else None)
-            page.on("response", lambda response: diagnostics["network_errors"].append(f"[{response.status}] {response.url}") if response.status >= 400 else None)
+            page.on(
+                "console",
+                lambda msg: (
+                    diagnostics["console_errors"].append(f"[{msg.type}] {msg.text}")
+                    if msg.type == "error"
+                    else None
+                ),
+            )
+            page.on(
+                "response",
+                lambda response: (
+                    diagnostics["network_errors"].append(f"[{response.status}] {response.url}")
+                    if response.status >= 400
+                    else None
+                ),
+            )
 
             page.goto(url, wait_until="networkidle", timeout=20000)
             time.sleep(wait_time)
@@ -497,7 +534,11 @@ def run_web_audit_impl(task_id: str, url: str, wait_time: int = 3) -> str:
     summary += f"📄 页面标题: {diagnostics['page_title']}\n"
     summary += f"📸 页面截图已存至: {diagnostics['screenshot_path']}\n\n"
 
-    if diagnostics["console_errors"] or diagnostics["network_errors"] or diagnostics["status"] == "failed":
+    if (
+        diagnostics["console_errors"]
+        or diagnostics["network_errors"]
+        or diagnostics["status"] == "failed"
+    ):
         summary += "⚠️ 【检测到页面异常】\n"
         if diagnostics["console_errors"]:
             summary += "🔴 Console 报错:\n" + "\n".join(diagnostics["console_errors"][:5]) + "\n"
