@@ -22,7 +22,7 @@ def test_adapter_registry_and_selection():
 def test_python_syntax_and_code_clean():
     """测试 2：Python 适配器的语法门禁与粘连修复"""
     adapter = get_adapter("python")
-    
+
     # 语法校验
     ok, _ = adapter.validate_syntax("test.py", "def hello():\n    return 'ok'")
     bad, err = adapter.validate_syntax("test.py", "def hello(\n broken")

@@ -1,21 +1,22 @@
 import sys
 from pathlib import Path
 
-from memory import retrieve_memory
+root_dir = Path(__file__).resolve().parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.insert(0, str(root_dir))
 
-# 将项目根目录添加到 Python 路径（让 utils、config 可导入）
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from memory import retrieve_memory
+from web_server import sync_broadcast
 
 sys.stdout = sys.stderr
 
 import json
 import os
-import threading
 import time
 
 # from playwright.sync_api import sync_playwright
-from datetime import datetime
-
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from state_machine import AgentState, TaskStateMachine
@@ -27,104 +28,22 @@ from tools.analysis_tools import (
     get_code_slice_impl,
     infer_build_steps_impl,
 )
-from tools.edit_tools import edit_file
+from tools.edit_tools import edit_file as edit_file_impl
 from tools.exec_tools import (
     execute_shell_command_impl,
 )
-from tools.fix_tools import (
-    batch_fix_backend_issues_impl,
-    batch_fix_console_logs_impl,
-    validate_code_syntax,
-)
-
-# 导入工具实现函数（从 tools 包）
-from tools.meta_tools import (
-    auto_respond_impl,
-    get_next_message_impl,
-    get_rules_impl,
-    get_tool_details_impl,
-    init_meta_tools,
-    orchestrate_task_impl,
-    search_tools_impl,
-)
-from tools.pipeline_tools import (
-    get_pipeline_status_impl,
-    init_pipeline_tools,
-    run_admin_pipeline_impl,
-    run_backend_pipeline_impl,
-    run_quality_pipeline_impl,
-    run_web_audit_impl,
-)
-from tools.scan_tools import (
-    check_code_quality_impl,
-    run_code_check_impl,
-    scan_admin_batch_impl,
-    scan_backend_batch_impl,
-    scan_code_batch_impl,
-)
 from utils.logger import setup_logger
-from utils.security import validate_path
+from utils.telemetry import TelemetryCollector
 
-# ===== 路径定义 =====
+# ===== 日志与基础路径 =====
 BASE_DIR = Path(__file__).parent.parent
-TEMPLATES_DIR = BASE_DIR / "assets" / "templates"
-REFS_DIR = BASE_DIR / "references"
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
-
-# ===== 日志配置 =====
 logger = setup_logger()
 
-# ===== 任务存储 =====
-pipeline_tasks = {}
-task_lock = threading.Lock()
-
-# ===== Agent 间消息队列 =====
-agent_message_queue = []
-message_lock = threading.Lock()
-
-
-def send_message(from_role: str, to_role: str, action: str, payload: dict):
-    """发送 Agent 间消息（内存队列）"""
-    with message_lock:
-        agent_message_queue.append(
-            {
-                "from": from_role,
-                "to": to_role,
-                "action": action,
-                "payload": payload,
-                "timestamp": datetime.now().isoformat(),
-            }
-        )
-
-
-# ===== MCP 实例 =====
+# ===== MCP 实例与 7 阶状态机 =====
 mcp = FastMCP("Company Dev Toolkit")
-
-# ===== 状态机 =====
 state_machine = TaskStateMachine(DB_CONFIG)
-
-# ===== 注入依赖到工具模块 =====
-init_meta_tools(
-    mcp_instance=mcp,
-    state_machine_instance=state_machine,
-    refs_dir=REFS_DIR,
-    logger_instance=logger,
-    agent_queue=agent_message_queue,
-    msg_lock=message_lock,
-    send_msg_func=send_message,
-    validate_func=validate_path,
-)
-
-init_pipeline_tools(
-    pipeline_tasks_dict=pipeline_tasks,
-    task_lock_obj=task_lock,
-    logger_obj=logger,
-    state_machine_obj=state_machine,
-    agent_state_cls=AgentState,
-    send_msg_func=send_message,
-    log_dir=LOG_DIR,
-)
 
 # ===== 加载 .env =====
 env_path = Path(__file__).parent.parent / ".env"
@@ -135,118 +54,25 @@ else:
     sys.stderr.write("[Config] 警告: .env 文件不存在，将使用系统环境变量\n")
 
 # ============================================================
-# 工具注册（包装调用）
+# 核心 MCP 工具原语注册 (只保留真正执行的 5 大金刚)
 # ============================================================
 
 
 @mcp.tool()
-@validate_path
-def search_tools(task_id: str, query: str = "", category: str = "", role: str = "developer") -> str:
-    return search_tools_impl(task_id, query, category, role)
-
-
-@mcp.tool()
-@validate_path
-def get_tool_details(tool_name: str) -> str:
-    return get_tool_details_impl(tool_name)
-
-
-@mcp.tool()
-def orchestrate_task(task_id: str, description: str) -> str:
-    return orchestrate_task_impl(task_id, description)
-
-
-@mcp.tool()
-def get_next_message(task_id: str, role: str) -> str:
-    return get_next_message_impl(task_id, role)
-
-
-@mcp.tool()
-def auto_respond(task_id: str, role: str) -> str:
-    return auto_respond_impl(task_id, role)
-
-
-@mcp.tool()
 def analyze_project_structure(project_path: str) -> str:
+    """分析项目结构与特征指纹"""
     return analyze_project_structure_impl(project_path)
 
 
 @mcp.tool()
 def infer_build_steps(fingerprint_json: str) -> str:
+    """根据指纹推理构建与测试指令"""
     return infer_build_steps_impl(fingerprint_json)
 
 
 @mcp.tool()
-@validate_path
-def scan_code_batch(project_path: str, offset: int = 0, limit: int = 20) -> str:
-    return scan_code_batch_impl(project_path, offset, limit)
-
-
-@mcp.tool()
-@validate_path
-def scan_backend_batch(project_path: str, offset: int = 0, limit: int = 20) -> str:
-    return scan_backend_batch_impl(project_path, offset, limit)
-
-
-@mcp.tool()
-@validate_path
-def scan_admin_batch(project_path: str, offset: int = 0, limit: int = 20) -> str:
-    return scan_admin_batch_impl(project_path, offset, limit)
-
-
-@mcp.tool()
-def run_code_check(project_path: str) -> str:
-    return run_code_check_impl(project_path)
-
-
-@mcp.tool()
-def check_code_quality(project_path: str, auto_fix: bool = False) -> str:
-    return check_code_quality_impl(project_path, auto_fix)
-
-
-@mcp.tool()
-def batch_fix_console_logs(file_paths: list, dry_run: bool = True) -> str:
-    return batch_fix_console_logs_impl(file_paths, dry_run)
-
-
-@mcp.tool()
-def batch_fix_backend_issues(file_paths: list, dry_run: bool = True) -> str:
-    return batch_fix_backend_issues_impl(file_paths, dry_run)
-
-
-@mcp.tool()
-def run_quality_pipeline(project_path: str, fix: bool = False) -> str:
-    return run_quality_pipeline_impl(project_path, fix)
-
-
-@mcp.tool()
-def run_backend_pipeline(project_path: str, fix: bool = False) -> str:
-    return run_backend_pipeline_impl(project_path, fix)
-
-
-@mcp.tool()
-def run_admin_pipeline(project_path: str, fix: bool = False) -> str:
-    return run_admin_pipeline_impl(project_path, fix)
-
-
-@mcp.tool()
-def get_pipeline_status(task_id: str) -> str:
-    return get_pipeline_status_impl(task_id)
-
-
-@mcp.tool()
-def run_web_audit(task_id: str, url: str, wait_time: int = 3) -> str:
-    return run_web_audit_impl(task_id, url, wait_time)
-
-
-@mcp.tool()
-def get_rules(task_id: str = None, language: str = None) -> str:
-    return get_rules_impl(task_id, language)
-
-
-@mcp.tool()
 def execute_shell_command(command: str, cwd: str = None) -> str:
-    """执行 shell 命令并返回 JSON 格式结果。用于执行构建、测试、运行等命令。"""
+    """执行底层 Shell 命令并返回结果（物理构建与测试执行器）"""
     return execute_shell_command_impl(command, cwd)
 
 
@@ -254,15 +80,14 @@ def execute_shell_command(command: str, cwd: str = None) -> str:
 def get_code_slice(
     file_path: str, target_line: int = None, context_window: int = 15, symbol_name: str = None
 ) -> str:
-    """根据行号或符号名称进行精准代码切片，提取目标代码块及依赖，降低 60%-80% 的 Token 消耗。"""
+    """根据行号精准切片代码，提取局部函数与依赖上下文（Token 降噪 90%+）"""
     return get_code_slice_impl(file_path, target_line, context_window, symbol_name)
 
 
 @mcp.tool()
-def check_code_syntax(file_path: str, code_content: str) -> str:
-    """在真正修改前对代码内容进行静态语法校验（支持 Python AST / PHP / JSON 等）。"""
-    is_valid, err_msg = validate_code_syntax(file_path, code_content)
-    return json.dumps({"is_valid": is_valid, "error_message": err_msg}, ensure_ascii=False)
+def edit_file(file_path: str, old_string: str, new_string: str) -> str:
+    """在文件中精准查找并替换代码内容"""
+    return edit_file_impl(file_path, old_string, new_string)
 
 
 # ===== 共享工作区文件读写工具 =====
@@ -285,7 +110,7 @@ def write_shared_file(project_path, filename, data):
 # ============================================================
 # 启动入口
 # ============================================================
-if __name__ == "__main__":
+def main():
     import argparse
     import json
     import re
@@ -299,15 +124,23 @@ if __name__ == "__main__":
     parser.add_argument(
         "--project", type=str, default=None, help="独立模式下指定项目路径，自动完成分析、推理、构建"
     )
-    parser.add_argument(
-        "--create", type=str, default=None, help="从 0 到 1 创建新项目的目标目录"
-    )
+    parser.add_argument("--create", type=str, default=None, help="从 0 到 1 创建新项目的目标目录")
     parser.add_argument(
         "--lang", type=str, default=None, help="显式指定语言适配器 (如 python, php)，留空则自动探测"
+    )
+    parser.add_argument(
+        "--ui", action="store_true", help="启动 DSH 风格的本地可视化 Web 控制台 (自动打开浏览器)"
     )
     # ==========
     parser.add_argument("--task", type=str, default="", help="独立模式下要执行的任务描述")
     args = parser.parse_args()
+
+    # 如果指定了 --ui，直接拉起 Web 可视化控制台
+    if args.ui:
+        from web_server import launch_web_ui
+
+        launch_web_ui()
+        sys.exit(0)
 
     # 只要使用了 --project 或 --create，自动开启 standalone 独立模式
     if args.project or args.create:
@@ -322,12 +155,13 @@ if __name__ == "__main__":
     if args.standalone:
         logger.info("===== MAS-Engine 独立运行模式 =====")
 
-        # 如果使用了 --project，自动生成标准任务描述
+        # 如果使用了 --project，仅在用户没有输入 task 时才自动生成默认描述
         if args.project:
             args.project = os.path.abspath(args.project)
             args.standalone = True
-            args.task = f"分析 {args.project} 项目结构，推理构建步骤，然后执行构建"
-            sys.stderr.write(f"🔧 快捷模式：自动生成任务描述 -> {args.task}\n")
+            if not args.task:
+                args.task = f"分析 {args.project} 项目结构，推理构建步骤，然后执行构建"
+            sys.stderr.write(f"🔧 确认任务描述 -> {args.task}\n")
 
         if not args.task:
             sys.stderr.write("❌ 错误: --standalone 模式需要指定 --task 参数\n")
@@ -336,27 +170,53 @@ if __name__ == "__main__":
 
         task_description = args.task
         task_id = f"standalone_{int(time.time())}"
+        telemetry_collector = TelemetryCollector()
+        telemetry_steps = []
+        step_idx_counter = 0
 
         # ===== 模式分流：创建新项目 (--create) vs 诊断修复现有项目 (--project) =====
         is_create_mode = bool(args.create)
-        target_dir = os.path.abspath(args.create if is_create_mode else (args.project or "."))
+        raw_path = (
+            str(args.create if is_create_mode else (args.project or "."))
+            .strip()
+            .strip('"')
+            .strip("'")
+        )
+        abs_path = os.path.abspath(raw_path)
 
-        # 确保目标物理目录真实存在
-        os.makedirs(target_dir, exist_ok=True)
+        # 1. 自动识别输入的是单文件还是文件夹
+        specific_file = None
+        if os.path.isfile(abs_path):
+            specific_file = os.path.basename(abs_path)  # 锁定单文件：如 通用网站爬虫简易版.py
+            target_dir = os.path.dirname(abs_path)  # 所在目录：D:\Python
+        else:
+            target_dir = abs_path
+
+        # 2. 只有从 0 创建新项目时才新建文件夹；已有项目只做存在性检查
+        if is_create_mode:
+            os.makedirs(target_dir, exist_ok=True)
+        else:
+            if not os.path.exists(abs_path):
+                sys.stderr.write(f"❌ 错误：目标路径不存在 -> {abs_path}\n")
+                sys.exit(1)
 
         if is_create_mode:
             task_description = args.task or "根据需求创建全新的项目"
-            initial_state = AgentState.REQUIREMENT_ANALYSIS  # 👈 从 0 创建：第一步必须是 Architect 架构分析
+            initial_state = (
+                AgentState.REQUIREMENT_ANALYSIS
+            )  # 👈 从 0 创建：第一步必须是 Architect 架构分析
             initial_role = "architect"
             sys.stderr.write(f"🏗️ [创建模式] 正在启动从 0 到 1 项目构建: {target_dir}\n")
         else:
             task_description = args.task or f"分析并修复 {target_dir} 项目"
-            initial_state = AgentState.WEB_TESTING          # 👈 诊断模式：直接进入测试捕获 Bug
+            initial_state = AgentState.WEB_TESTING  # 👈 诊断模式：直接进入测试捕获 Bug
             initial_role = "tester"
             sys.stderr.write(f"🔧 [诊断模式] 正在对现有项目进行测试与自愈: {target_dir}\n")
 
         # 动态装配语言适配器 (支持 --lang 显式指定，或根据目标目录自动探测)
-        adapter = get_adapter(args.lang) if getattr(args, "lang", None) else detect_adapter(target_dir)
+        adapter = (
+            get_adapter(args.lang) if getattr(args, "lang", None) else detect_adapter(target_dir)
+        )
         sys.stderr.write(f"🔌 [Adapter] 已成功装配专职语言适配器: [{adapter.name.upper()}]\n")
         task_id = f"standalone_{int(time.time())}"
         sys.stderr.write(f"📋 任务描述: {task_description}\n")
@@ -371,24 +231,15 @@ if __name__ == "__main__":
                 "current_role": initial_role,
                 "completed_steps": [],
                 "project_path": target_dir,
+                "specific_file": specific_file,
                 "is_create_mode": is_create_mode,
                 "language": adapter.name,
             },
         )
         sys.stderr.write(f"📌 任务已创建: 初始状态={initial_state}, 角色={initial_role}\n")
 
-        state_machine.update_task_state(
-                task_id,
-                initial_state,
-                {
-                    "description": task_description,
-                "current_role": initial_role,
-                "completed_steps": [],
-                "project_path": target_dir,
-                "is_create_mode": is_create_mode,
-                },
-            )
-        sys.stderr.write(f"📌 任务已创建: 初始状态={initial_state}, 角色={initial_role}\n")
+        # 初始广播使用 initial_state
+        sync_broadcast("STATE_CHANGE", {"state": initial_state, "role": initial_role})
 
         # ===== Agent 循环 =====
         max_iterations = 5
@@ -406,73 +257,40 @@ if __name__ == "__main__":
                     with open(agents_file, "r", encoding="utf-8") as f:
                         content = f.read().strip()
                         if content:
-                            sys.stderr.write("📄 [Pi-Core] 已成功挂载项目专属 AGENTS.md 声明式规则\n")
+                            sys.stderr.write(
+                                "📄 [Pi-Core] 已成功挂载项目专属 AGENTS.md 声明式规则\n"
+                            )
                             return f"\n【项目定制规范 (AGENTS.md)】:\n{content}\n"
                 except Exception:
                     pass
             return ""
 
-        # 工具映射表（直接使用已注册的函数）
+        # 工具映射表 (仅保留 5 个核心工具)
         tool_map = {
-            "search_tools": search_tools,
-            "get_tool_details": get_tool_details,
-            "get_rules": get_rules,
-            "get_pipeline_status": get_pipeline_status,
-            "scan_code_batch": scan_code_batch,
-            "scan_backend_batch": scan_backend_batch,
-            "scan_admin_batch": scan_admin_batch,
-            "batch_fix_console_logs": batch_fix_console_logs,
-            "batch_fix_backend_issues": batch_fix_backend_issues,
-            "run_quality_pipeline": run_quality_pipeline,
-            "run_backend_pipeline": run_backend_pipeline,
-            "run_admin_pipeline": run_admin_pipeline,
-            "run_web_audit": run_web_audit,
-            "orchestrate_task": orchestrate_task,
-            "get_next_message": get_next_message,
             "analyze_project_structure": analyze_project_structure,
             "infer_build_steps": infer_build_steps,
             "execute_shell_command": execute_shell_command,
-            "edit_file": edit_file,
             "get_code_slice": get_code_slice,
-            "validate_code_syntax": check_code_syntax,
+            "edit_file": edit_file,
         }
 
-        # 基础工具列表（供 LLM 参考）
+        # 传递给大模型的极简工具清单 (极大降低 Prompt 开销)
         all_tools = [
-            {"name": "search_tools", "description": "搜索可用的工具"},
-            {"name": "get_tool_details", "description": "获取工具详情"},
-            {"name": "get_rules", "description": "获取开发规则（可指定语言）"},
-            {"name": "get_pipeline_status", "description": "查询流水线状态"},
-            {"name": "scan_code_batch", "description": "分批扫描代码质量"},
-            {"name": "scan_backend_batch", "description": "扫描后端代码"},
-            {"name": "scan_admin_batch", "description": "扫描后台代码"},
-            {"name": "batch_fix_console_logs", "description": "修复 console.log"},
-            {"name": "batch_fix_backend_issues", "description": "修复后端问题"},
-            {"name": "run_quality_pipeline", "description": "运行质量流水线"},
-            {"name": "run_backend_pipeline", "description": "运行后端流水线"},
-            {"name": "run_admin_pipeline", "description": "运行后台流水线"},
-            {"name": "run_web_audit", "description": "执行网页审计"},
-            {"name": "orchestrate_task", "description": "任务编排"},
-            {"name": "get_next_message", "description": "获取下一条消息"},
-            {"name": "analyze_project_structure", "description": "分析项目结构指纹"},
-            {"name": "infer_build_steps", "description": "推理构建步骤"},
-            {
-                "name": "execute_shell_command",
-                "description": "执行 shell 命令（如构建、测试、运行等）",
-            },
-            {
-                "name": "edit_file",
-                "description": "通用文件编辑工具：在文件中查找并替换字符串。适用于修复代码错误。",
-            },
-            {
-                "name": "get_code_slice",
-                "description": "根据行号或符号名称进行精准代码切片，提取目标函数块及依赖，节省上下文",
-            },
-            {
-                "name": "validate_code_syntax",
-                "description": "在真正修改前对代码内容进行静态语法安全校验（Python AST/PHP/JSON）",
-            },
+            {"name": "analyze_project_structure", "description": "分析项目结构指纹与源文件列表"},
+            {"name": "infer_build_steps", "description": "根据项目结构推理构建和测试指令"},
+            {"name": "execute_shell_command", "description": "执行物理命令 (如构建、测试、编译等)"},
+            {"name": "get_code_slice", "description": "提取局部目标函数块及依赖，降低 Token 消耗"},
+            {"name": "edit_file", "description": "在目标文件中查找并替换修复代码"},
         ]
+
+        # 核心参数白名单过滤器
+        tool_params = {
+            "analyze_project_structure": ["project_path"],
+            "infer_build_steps": ["fingerprint_json"],
+            "execute_shell_command": ["command", "cwd", "workdir"],
+            "get_code_slice": ["file_path", "target_line", "context_window", "symbol_name"],
+            "edit_file": ["file_path", "old_string", "new_string"],
+        }
 
         # ===== 初始化 LLM 提供者 =====
         try:
@@ -495,6 +313,7 @@ if __name__ == "__main__":
             context = task_data.get("context", {})
             current_role = context.get("current_role", "developer")
             completed_steps = context.get("completed_steps", [])
+            sync_broadcast("STATE_CHANGE", {"state": current_state, "role": current_role})
 
             # ===== 状态无进展检测（熔断） =====
             last_fix_state = context.get("last_fix_state")
@@ -539,7 +358,7 @@ if __name__ == "__main__":
                 sys.stderr.write("🧠 [Architect] 正在规划项目架构与文件树...\n")
 
                 arch_system = "你是一个架构师 Architect。请根据需求分析并规划项目文件列表，只输出严格的 JSON 对象。"
-                arch_prompt = f"""需求: {context.get('description', '')}
+                arch_prompt = f"""需求: {context.get("description", "")}
 目标目录: {project_path}
 语言环境: {adapter.name.upper()}
 {custom_rules}
@@ -567,7 +386,9 @@ if __name__ == "__main__":
 
                 context["planned_files"] = planned_files
                 sys.stderr.write(f"📋 Architect 规划完成，待生成文件清单: {planned_files}\n")
-                sys.stderr.write("🔄 状态机推进: REQUIREMENT_ANALYSIS ──> CODE_CONSTRUCTION (激活 mas-developer)\n")
+                sys.stderr.write(
+                    "🔄 状态机推进: REQUIREMENT_ANALYSIS ──> CODE_CONSTRUCTION (激活 mas-developer)\n"
+                )
                 state_machine.update_task_state(task_id, AgentState.CODE_CONSTRUCTION, context)
                 continue
 
@@ -585,7 +406,7 @@ if __name__ == "__main__":
                     os.makedirs(os.path.dirname(file_full_path), exist_ok=True)
 
                     dev_system = f"你是一个精通 {adapter.name.upper()} 的高级开发工程师 Developer。请直接输出目标文件的完整源码，放在 ``` 代码块中。"
-                    dev_prompt = f"""需求: {context.get('description', '')}
+                    dev_prompt = f"""需求: {context.get("description", "")}
 正在编写文件: {rel_file}
 {custom_rules}
 请给出该文件的完整、高质量、可运行代码。"""
@@ -632,7 +453,9 @@ if __name__ == "__main__":
 
                     if syntax_all_pass:
                         sys.stderr.write("✅ [Tester] 全量生成文件经适配器静态门禁验证通过！\n")
-                        state_machine.update_task_state(task_id, AgentState.DELIVERY_COMPLETED, context)
+                        state_machine.update_task_state(
+                            task_id, AgentState.DELIVERY_COMPLETED, context
+                        )
                         continue
 
                 # 真实物理测试执行（命令完全由适配器提供，零硬编码）
@@ -650,11 +473,23 @@ if __name__ == "__main__":
                     report_data = {
                         "status": "fail",
                         "error_message": err_msg[-500:],
-                        "exit_code": test_res.get("exit_code")
+                        "exit_code": test_res.get("exit_code"),
                     }
                     write_shared_file(project_path, "test_report.json", report_data)
                     context["test_report"] = report_data
                     state_machine.update_task_state(task_id, AgentState.SELF_HEALING, context)
+                    # 推送单测结果到 Web 界面
+                    sync_broadcast(
+                        "TEST_OUTPUT",
+                        {
+                            "output": (
+                                test_res.get("stdout", "") + test_res.get("stderr", "")
+                            ).strip(),
+                            "passed": bool(
+                                test_res.get("success") and test_res.get("exit_code") == 0
+                            ),
+                        },
+                    )
                     continue
 
             # ------------------------------------------------------------
@@ -666,7 +501,9 @@ if __name__ == "__main__":
                 sys.stderr.write("🔧 [Fixer] 正在调用本地 mas-fixer 专职模型生成修复方案...\n")
 
                 source_files = context.get("source_files", [])
-                target_rel_file = source_files[0] if source_files else adapter.default_entry_file
+                target_rel_file = context.get("specific_file") or (
+                    source_files[0] if source_files else adapter.default_entry_file
+                )
                 source_file_path = os.path.join(project_path, target_rel_file)
 
                 source_content = ""
@@ -699,6 +536,11 @@ if __name__ == "__main__":
                 sys.stderr.write(f"✅ 修复补丁已成功应用至: {source_file_path}\n")
                 sys.stderr.write("🔄 状态机推进: SELF_HEALING ──> WEB_TESTING (回归测试)\n")
                 state_machine.update_task_state(task_id, AgentState.WEB_TESTING, context)
+                # 推送左右分栏代码 Diff 到 Web 界面
+                sync_broadcast(
+                    "DIFF_PREVIEW",
+                    {"file": target_rel_file, "old_code": source_content, "new_code": fixed_code},
+                )
                 continue
 
             # ------------------------------------------------------------
@@ -706,6 +548,16 @@ if __name__ == "__main__":
             # ------------------------------------------------------------
             elif current_state == AgentState.DELIVERY_COMPLETED:
                 sys.stderr.write("🎉 [Auditor] 任务全量验证就绪，成功交付！\n")
+                # 自动归档数据飞轮
+                telemetry_collector.record_task_session(
+                    task_id=task_id,
+                    project_name=os.path.basename(project_path or "unnamed"),
+                    language=adapter.name,
+                    task_description=task_description,
+                    is_create_mode=is_create_mode,
+                    steps=telemetry_steps,
+                    final_verdict="SUCCESS",
+                )
                 break
 
             # ===== 7. 调用 LLM =====
@@ -1212,3 +1064,7 @@ if __name__ == "__main__":
     else:
         logger.info("启动 MCP 服务在 stdio 模式")
         mcp.run()
+
+
+if __name__ == "__main__":
+    main()

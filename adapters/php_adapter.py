@@ -95,7 +95,9 @@ class PHPAdapter(BaseLanguageAdapter):
         if not check_content.startswith("<?php") and not check_content.startswith("<?"):
             check_content = "<?php\n" + check_content
 
-        with tempfile.NamedTemporaryFile(suffix=".php", mode="w", delete=False, encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(
+            suffix=".php", mode="w", delete=False, encoding="utf-8"
+        ) as f:
             f.write(check_content)
             tmp_path = f.name
 

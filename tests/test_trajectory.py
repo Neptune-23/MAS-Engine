@@ -1,4 +1,3 @@
-import json
 import shutil
 import sys
 import tempfile
@@ -51,7 +50,7 @@ def test_trajectory_recording_and_sft_dpo_export():
         sft_output = Path(tmp_log_dir) / "sft.json"
         sft_items = logger.export_to_sft_format(str(sft_output))
         assert len(sft_items) == 1
-        
+
         conv_list = sft_items[0]["conversations"]
         assistant_reply = [m["value"] for m in conv_list if m.get("from") == "assistant"][0]
         assert assistant_reply == "def correct_fix(): return True"

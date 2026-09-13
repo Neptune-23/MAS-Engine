@@ -1,9 +1,10 @@
-import sys
 import re
+import sys
 from pathlib import Path
 
 root_dir = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(root_dir))
+
 
 def is_test_assertion_tampering(patch_diff: str, file_path: str) -> bool:
     """
@@ -26,16 +27,17 @@ def is_test_assertion_tampering(patch_diff: str, file_path: str) -> bool:
             return True
     return False
 
+
 def test_anti_reward_hacking_detection():
     """测试：拦截 Fixer 篡改测试断言以假装通过测试的行为"""
-    
+
     # 模拟 Fixer 试图作弊生成的补丁
     cheating_patch = """
     def test_calculator():
 -       assert add(2, 2) == 4
 +       assert True  # 恶意作弊绕过测试
     """
-    
+
     is_cheating = is_test_assertion_tampering(cheating_patch, "tests/test_calc.py")
     assert is_cheating is True, "必须成功识别并将篡改测试断言的行为标记为 Reward Hacking 作弊！"
 

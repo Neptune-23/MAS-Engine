@@ -84,7 +84,15 @@ def analyze_project_structure_impl(project_path: str) -> str:
 
         # ===== 扫描项目所有 Python 和 PHP 文件，自动排除无关目录 =====
     all_code_files = []
-    EXCLUDE_DIRS = {"venv", "__pycache__", ".pytest_cache", "vendor", "node_modules", "storage", ".git"}
+    EXCLUDE_DIRS = {
+        "venv",
+        "__pycache__",
+        ".pytest_cache",
+        "vendor",
+        "node_modules",
+        "storage",
+        ".git",
+    }
 
     for ext_pattern in ["**/*.py", "**/*.php"]:
         for file_path in path.glob(ext_pattern):
@@ -98,7 +106,12 @@ def analyze_project_structure_impl(project_path: str) -> str:
     for f in all_code_files:
         basename = os.path.basename(f)
         # 支持 Python (test_*.py, *_test.py) 和 PHP (*Test.php, test_*.php, *_test.php)
-        if basename.startswith("test_") or basename.endswith("_test.py") or basename.endswith("Test.php") or basename.endswith("_test.php"):
+        if (
+            basename.startswith("test_")
+            or basename.endswith("_test.py")
+            or basename.endswith("Test.php")
+            or basename.endswith("_test.php")
+        ):
             test_files.append(f)
         else:
             source_files.append(f)
@@ -165,7 +178,11 @@ def infer_build_steps_impl(fingerprint_json: str) -> str:
     elif language == "PHP":
         build_steps = ["composer install --no-interaction"]
         test_steps = ["vendor/bin/phpunit --colors=never"]
-        run_steps = ["php -S 0.0.0.0:8000 -t public" if any("public" in f for f in entry_files) else "php -S 0.0.0.0:8000"]
+        run_steps = [
+            "php -S 0.0.0.0:8000 -t public"
+            if any("public" in f for f in entry_files)
+            else "php -S 0.0.0.0:8000"
+        ]
     elif language == "Java":
         if package_manager == "maven":
             build_steps = ["mvn compile"]

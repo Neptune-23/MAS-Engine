@@ -51,7 +51,10 @@ SEED_BANK = [
         "name": "php_calc_discount",
         "source": "<?php\nfunction calculateDiscount(float $price, float $discount): float {\n    return $price * (1.0 - $discount);\n}\n",
         "test": "<?php\nuse PHPUnit\\Framework\\TestCase;\nrequire_once 'main.php';\n\nclass DiscountTest extends TestCase {\n    public function testDiscount() {\n        $this->assertEquals(80.0, calculateDiscount(100.0, 0.2));\n    }\n}\n",
-        "bug_mutation": ("return $price * (1.0 - $discount);", "return $price * (1.0 + $discount);"),
+        "bug_mutation": (
+            "return $price * (1.0 - $discount);",
+            "return $price * (1.0 + $discount);",
+        ),
     },
     {
         "name": "php_array_filter",

@@ -1,5 +1,5 @@
-import sys
 import json
+import sys
 import tempfile
 from pathlib import Path
 
@@ -9,9 +9,11 @@ sys.path.insert(0, str(root_dir / "mcp-server"))
 
 from tools.analysis_tools import get_code_slice_impl
 
+
 def test_ast_code_slicing_precision():
     """测试 1：AST 代码切片对嵌套函数与顶级 Imports 的精准定位"""
-    sample_code = """import os
+    sample_code = (
+        """import os
 import sys
 from datetime import datetime
 
@@ -27,7 +29,9 @@ class PaymentGateway:
 
     def refund(self, order_id: str):
         return True
-""" + "\n# 填充额外代码模拟大型工程文件\n" * 100
+"""
+        + "\n# 填充额外代码模拟大型工程文件\n" * 100
+    )
 
     with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False, encoding="utf-8") as f:
         f.write(sample_code)
@@ -45,6 +49,7 @@ class PaymentGateway:
     finally:
         if Path(tmp_file).exists():
             Path(tmp_file).unlink()
+
 
 def test_token_reduction_ratio_benchmark():
     """测试 2：硬核指标断言 —— Token 降噪削减率必须大于 85%"""
@@ -65,7 +70,9 @@ def test_token_reduction_ratio_benchmark():
         res = json.loads(res_json)
 
         saving_ratio = float(res["token_saving_percent"].replace("%", ""))
-        assert saving_ratio >= 85.0, f"Token 削减率未达到工业级标准 (要求 >= 85%，实际 {saving_ratio}%)"
+        assert saving_ratio >= 85.0, (
+            f"Token 削减率未达到工业级标准 (要求 >= 85%，实际 {saving_ratio}%)"
+        )
     finally:
         if Path(tmp_file).exists():
             Path(tmp_file).unlink()
