@@ -24,6 +24,7 @@ from state_machine import AgentState, TaskStateMachine
 from adapters import detect_adapter, get_adapter
 from config.settings import DB_CONFIG
 from kernel.chunk import ActionChunk, ActionPrimitive, ActionType, ChunkStatus
+from kernel.evolution import EvolvedSkillRegistry, SkillSynthesizer, TrajectoryMiner
 from kernel.runner import ActionChunkRunner
 from tools.analysis_tools import (
     analyze_project_structure_impl,
@@ -221,6 +222,9 @@ def main():
         )
         sys.stderr.write(f"🔌 [Adapter] 已成功装配专职语言适配器: [{adapter.name.upper()}]\n")
         chunk_runner = ActionChunkRunner(default_adapter=adapter)
+        skill_registry = EvolvedSkillRegistry()
+        skill_miner = TrajectoryMiner()
+        skill_synthesizer = SkillSynthesizer()
         task_id = f"standalone_{int(time.time())}"
         sys.stderr.write(f"📋 任务描述: {task_description}\n")
         sys.stderr.write(f"🆔 任务 ID: {task_id}\n")
@@ -531,12 +535,28 @@ def main():
                 fixer_system = f"你是一个代码修复专家 Fixer。请修复 {adapter.name.upper()} 代码缺陷，直接输出替换代码放入 ``` 代码块中。"
                 fixer_user_prompt = f"文件: {target_rel_file}\n报错信息:\n{report_data.get('error_message', '')[:400]}\n源码:\n{source_content}"
 
-                fixer_resp = llm_provider.generate_response(
-                    system_prompt=fixer_system,
-                    user_prompt=fixer_user_prompt,
-                    temperature=0.1,
-                    current_state=AgentState.SELF_HEALING,
+                # ============================================================
+                # 【RSI 递归自进化快车道】
+                # 优先匹配已进化的程序化宏技能，命中则 0-Token 秒级修复！
+                # ============================================================
+                err_text = report_data.get("error_message", "")
+                hit, fast_code, skill_id = skill_registry.try_fast_path_fix(
+                    language=adapter.name,
+                    error_message=err_text,
+                    source_content=source_content
                 )
+
+                if hit:
+                    sys.stderr.write(f"⚡ [RSI-Evolution] 命中已进化程序化宏技能 [{skill_id}]！0-Token 执行极速自愈！\n")
+                    sync_broadcast("ACTION_LOG", {"action": "触发进化技能", "detail": f"命中宏技能 {skill_id}，跳过 7B 模型推理"})
+                    fixer_resp = fast_code
+                else:
+                    fixer_resp = llm_provider.generate_response(
+                        system_prompt=fixer_system,
+                        user_prompt=fixer_user_prompt,
+                        temperature=0.1,
+                        current_state=AgentState.SELF_HEALING,
+                    )
                 fixed_code = adapter.clean_format_code(fixer_resp)
 
                 # 构建自愈动作块 (原子写入 + 语法门禁校验)
@@ -582,6 +602,16 @@ def main():
                     steps=telemetry_steps,
                     final_verdict="SUCCESS",
                 )
+                # 触发自演化：挖掘成功轨迹并尝试合成新宏技能
+                try:
+                    new_patterns = skill_miner.mine_successful_patterns(min_frequency=1)
+                    for pat in new_patterns:
+                        skill_synthesizer.synthesize_skill(pat)
+                    reloaded = skill_registry.reload_skills()
+                    if reloaded > 0:
+                        sys.stderr.write(f"🌱 [RSI-Evolution] 系统已自动扩充动态动作空间，当前挂载技能数: {reloaded}\n")
+                except Exception:
+                    pass
                 break
 
             # ===== 7. 调用 LLM =====
