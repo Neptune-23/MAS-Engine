@@ -77,7 +77,7 @@ ruff check . --fix
 pytest -v
 3. Launching the MCP Server
 Bash
-python mcp-server/server.py
+python mcp_server/server.py
 
 
 🧪 Test Suite Overview

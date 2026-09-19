@@ -14,9 +14,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖与项目配置
+# 复制依赖与项目配置
 COPY pyproject.toml README.md ./
 COPY config/ config/
-COPY mcp-server/ mcp-server/
+COPY mcp_server/ mcp_server/
+COPY adapters/ adapters/
+COPY kernel/ kernel/
 COPY tools/ tools/
 COPY utils/ utils/
 COPY references/ references/

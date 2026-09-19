@@ -6,21 +6,39 @@ from typing import Any, Dict, List, Set, Tuple
 
 from adapters.base import BaseLanguageAdapter
 
-class PythonAdapter(BaseLanguageAdapter):
-    def validate_syntax(self, code: str) -> bool:
-        if not code or not code.strip():
-            return False
-        try:
-            tree = ast.parse(code)
-            # 防御：如果 AST 仅包含单个字典表达式（即泄露的未解析 JSON），直接拒绝
-            if len(tree.body) == 1 and isinstance(tree.body[0], ast.Expr):
-                if isinstance(tree.body[0].value, ast.Dict):
-                    return False
-            return True
-        except SyntaxError:
-            return False
 
 class PythonAdapter(BaseLanguageAdapter):
+
+    def validate_syntax(
+            self, file_path_or_code: str, code_content: str = None
+        ) -> tuple[bool, str]:
+        """校验 Python 代码语法，并防御裸字典 AST（未解包 JSON）"""
+        if code_content is None:
+            code = file_path_or_code
+        else:
+            code = code_content
+
+        if not code or not code.strip():
+            return False, "代码内容为空"
+
+        try:
+            tree = ast.parse(code)
+            # 核心守卫：如果 AST 仅包含单个字典表达式，判定为泄漏的 JSON 报文，拒绝放行
+            if (
+                len(tree.body) == 1
+                and isinstance(tree.body[0], ast.Expr)
+                and isinstance(tree.body[0].value, ast.Dict)
+            ):
+                return (
+                False,
+                "语法校验拦截：检测到内容为纯字典字面量，疑似未解包的 JSON 信封",
+            )
+
+            return True, "Python 语法校验通过"
+        except SyntaxError as e:
+            return False, f"Python 语法错误: {e}"
+
+
     """Python 语言插拔式适配器"""
 
     @property
@@ -115,13 +133,6 @@ class PythonAdapter(BaseLanguageAdapter):
             "sliced_code": "\n".join(sliced_code),
             "token_saving_percent": f"{token_saving}%",
         }
-
-    def validate_syntax(self, file_path: str, code_content: str) -> Tuple[bool, str]:
-        try:
-            ast.parse(code_content)
-            return True, ""
-        except SyntaxError as e:
-            return False, f"Python SyntaxError at line {e.lineno}: {e.msg}\n  --> {e.text}"
 
     def clean_format_code(self, raw_code: str) -> str:
         code = raw_code.replace("Ġ", " ").replace("Ċ", "\n").replace("ĉ", "\t").strip()

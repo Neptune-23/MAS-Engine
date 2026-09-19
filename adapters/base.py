@@ -1,47 +1,54 @@
+import json
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
-import json
-import re
 
-class BaseAdapter:
-    # ...
-    def clean_format_code(self, raw_resp: str) -> str:
-        if not raw_resp or not isinstance(raw_resp, str):
-            return ""
-        
-        text = raw_resp.strip()
+class BaseLanguageAdapter:
 
-        # 1. 优先尝试解析 JSON 信封（处理 {"fixed_content": "...", ...}）
-        try:
-            # 去除外部可能包裹的 ```json ... ```
-            json_candidate = text
-            if json_candidate.startswith("```json"):
-                json_candidate = json_candidate[7:]
-            elif json_candidate.startswith("```"):
-                json_candidate = json_candidate[3:]
-            if json_candidate.endswith("```"):
-                json_candidate = json_candidate[:-3]
-            json_candidate = json_candidate.strip()
+  def clean_format_code(self, raw_resp: str) -> str:
+    """清洗大模型输出，剥离 Markdown 代码块或 JSON 信封"""
+    if not raw_resp or not isinstance(raw_resp, str):
+      return ""
 
-            if json_candidate.startswith("{") and json_candidate.endswith("}"):
-                data = json.loads(json_candidate)
-                if isinstance(data, dict):
-                    for key in ["fixed_content", "code", "content", "source", "fixed_code"]:
-                        if key in data and isinstance(data[key], str):
-                            text = data[key].strip()
-                            break
-        except Exception:
-            pass
+    text = raw_resp.strip()
 
-        # 2. 提取 Markdown 代码块（如 ```python ... ```）
-        code_block_match = re.search(r"```(?:[a-zA-Z0-9_\+\-]+)?\n([\s\S]*?)```", text)
-        if code_block_match:
-            return code_block_match.group(1).strip()
+    # 1. 优先提取 Markdown 代码块
+    code_block_match = re.search(
+        r"```(?:[a-zA-Z0-9_\+\-]+)?\n([\s\S]*?)```", text
+    )
+    if code_block_match:
+      text = code_block_match.group(1).strip()
 
-        # 3. 若无标记则返回净化后的纯文本
-        return text
+    # 2. 检查是否包裹在 JSON 信封中 (如 {"fixed_content": "..."})
+    if text.startswith("{") and text.endswith("}"):
+      try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+          for key in [
+              "fixed_content",
+              "code",
+              "content",
+              "source",
+              "fixed_code",
+          ]:
+            if key in data and isinstance(data[key], str):
+              text = data[key].strip()
+              break
+      except Exception:
+        pass
+
+    # 3. 再次解开可能嵌套的代码块
+    inner_block = re.search(r"```(?:[a-zA-Z0-9_\+\-]+)?\n([\s\S]*?)```", text)
+    if inner_block:
+      text = inner_block.group(1).strip()
+
+    return text
+
+
+# 兼容别名
+BaseAdapter = BaseLanguageAdapter
 
 
 class BaseLanguageAdapter(ABC):

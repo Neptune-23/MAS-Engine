@@ -9,13 +9,16 @@ from pathlib import Path
 
 root_dir = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(root_dir))
-sys.path.insert(0, str(root_dir / "mcp-server"))
+sys.path.insert(0, str(root_dir / "mcp_server"))
 
 from llm_provider import LocalLLMProvider
 from memory import TaskReflexionBuffer
 
 from adapters.python_adapter import PythonAdapter
-validate_code_syntax = lambda code: PythonAdapter().validate_syntax(code)
+
+
+def validate_code_syntax(file_path, code_content=None):
+  return PythonAdapter().validate_syntax(file_path, code_content)
 
 COMPLEX_BENCHMARK_CASES = [
     {

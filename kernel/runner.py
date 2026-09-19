@@ -43,60 +43,96 @@ class ActionChunkRunner:
         )
 
     def _dispatch_primitive(
-        self, primitive: ActionPrimitive, sandbox_path: Path, adapter: BaseLanguageAdapter
+        self,
+        primitive: ActionPrimitive,
+        sandbox_path: Path,
+        adapter: BaseLanguageAdapter,
     ) -> Dict[str, Any]:
-        """原子执行原语"""
-        try:
-            if primitive.action_type == ActionType.WRITE_FILE:
-                target = sandbox_path / primitive.target_file
-                target.parent.mkdir(parents=True, exist_ok=True)
-                content = primitive.payload.get("content", "")
+      """原子执行原语"""
+      try:
+        # ============================================================
+        # 1. 统一沙箱越界防御（在任何物理写/读操作前拦截）
+        # ============================================================
+        target = (sandbox_path / primitive.target_file).resolve()
+        sandbox_resolved = sandbox_path.resolve()
+        if not str(target).startswith(str(sandbox_resolved)):
+          return {
+              "success": False,
+              "error": (
+                  f"安全拦截：目标路径 {primitive.target_file} 超出工作区沙箱边界"
+              ),
+          }
 
-                # 写入前先由适配器进行静态语法预检
-                is_valid, err = adapter.validate_syntax(primitive.target_file, content)
-                if not is_valid:
-                    return {"success": False, "error": f"语法门禁拦截: {err}"}
+        # ============================================================
+        # 2. WRITE_FILE 分支
+        # ============================================================
+        if primitive.action_type == ActionType.WRITE_FILE:
+          target.parent.mkdir(parents=True, exist_ok=True)
+          content = primitive.payload.get("content", "")
 
-                with open(target, "w", encoding="utf-8") as f:
-                    f.write(content)
-                return {"success": True, "written_bytes": len(content.encode("utf-8"))}
-            target = (sandbox_path / primitive.target_file).resolve()
-            sandbox_resolved = sandbox_path.resolve()
+          # 写入前先由适配器进行静态语法预检
+          is_valid, err = adapter.validate_syntax(
+              primitive.target_file, content
+          )
+          if not is_valid:
+            return {"success": False, "error": f"语法门禁拦截: {err}"}
 
-            if not str(target).startswith(str(sandbox_resolved)):
-                return False, f"安全拦截：目标路径 {primitive.target_file} 超出工作区沙箱边界"
+          with open(target, "w", encoding="utf-8") as f:
+            f.write(content)
+          return {
+              "success": True,
+              "written_bytes": len(content.encode("utf-8")),
+          }
 
-            elif primitive.action_type == ActionType.READ_SLICE:
-                target = sandbox_path / primitive.target_file
-                line = primitive.payload.get("target_line", 1)
-                slice_data = adapter.get_code_slice(target, target_line=line)
-                return {"success": True, "slice": slice_data}
+        # ============================================================
+        # 3. READ_SLICE 分支
+        # ============================================================
+        elif primitive.action_type == ActionType.READ_SLICE:
+          line = primitive.payload.get("target_line", 1)
+          slice_data = adapter.get_code_slice(target, target_line=line)
+          return {"success": True, "slice": slice_data}
 
-            elif primitive.action_type == ActionType.RUN_COMMAND:
-                cmd = primitive.payload.get("command", "")
-                res = subprocess.run(
-                    cmd, shell=True, cwd=str(sandbox_path), capture_output=True, text=True, timeout=15
-                )
-                success = res.returncode == 0
-                return {
-                    "success": success,
-                    "exit_code": res.returncode,
-                    "stdout": res.stdout[:500],
-                    "stderr": res.stderr[:500],
-                }
+        # ============================================================
+        # 4. RUN_COMMAND 分支
+        # ============================================================
+        elif primitive.action_type == ActionType.RUN_COMMAND:
+          cmd = primitive.payload.get("command", "")
+          res = subprocess.run(
+              cmd,
+              shell=True,
+              cwd=str(sandbox_path),
+              capture_output=True,
+              text=True,
+              timeout=15,
+          )
+          success = res.returncode == 0
+          return {
+              "success": success,
+              "exit_code": res.returncode,
+              "stdout": res.stdout[:500],
+              "stderr": res.stderr[:500],
+          }
 
-            # 补齐 VALIDATE_SYNTAX 原语分支
-            elif primitive.action_type == ActionType.VALIDATE_SYNTAX:
-                code = primitive.content or ""
-                target_file_path = (sandbox_path / primitive.target_file).resolve()
-                if not code and target_file_path.exists():
-                    code = target_file_path.read_text(encoding="utf-8", errors="ignore")
-                
-                is_valid = self.adapter.validate_syntax(code)
-                msg = "语法合法性校验通过" if is_valid else "语法校验未通过"
-                return is_valid, msg
+        # ============================================================
+        # 5. 补齐 VALIDATE_SYNTAX 原语分支（从 payload 取 content 并返回 dict）
+        # ============================================================
+        elif primitive.action_type == ActionType.VALIDATE_SYNTAX:
+          content = primitive.payload.get("content", "")
+          if not content and target.exists():
+            content = target.read_text(encoding="utf-8", errors="ignore")
 
-            return {"success": False, "error": f"未知动作原语: {primitive.action_type}"}
+          is_valid, msg = adapter.validate_syntax(
+              primitive.target_file, content
+          )
+          if is_valid:
+            return {"success": True, "message": msg}
+          else:
+            return {"success": False, "error": msg}
 
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        return {
+            "success": False,
+            "error": f"未知动作原语: {primitive.action_type}",
+        }
+
+      except Exception as e:
+        return {"success": False, "error": str(e)}

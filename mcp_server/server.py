@@ -8,8 +8,8 @@ if str(root_dir) not in sys.path:
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 
 # ============================================================
 # 确保当前目录 (mcp_server) 和项目根目录均在 sys.path 中
@@ -21,14 +21,13 @@ if str(_CURRENT_DIR) not in sys.path:
 _ROOT_DIR = _CURRENT_DIR.parent
 if str(_ROOT_DIR) not in sys.path:
   sys.path.insert(0, str(_ROOT_DIR))
-  
+
 from memory import retrieve_memory
 from web_server import sync_broadcast
 
 sys.stdout = sys.stderr
 
 import json
-import os
 import time
 
 # from playwright.sync_api import sync_playwright
@@ -1118,17 +1117,22 @@ def main():
 
     # ===== MCP 模式 =====
     if args.http:
-        import uvicorn
+      import uvicorn
 
+      if hasattr(mcp, "http_app"):
+        app = mcp.http_app(transport="sse")
+      elif hasattr(mcp, "sse_app"):
         app = mcp.sse_app()
-        if hasattr(mcp, "http_app"):
-            app = mcp.http_app(transport="sse")
-        elif hasattr(mcp, "sse_app"):
-            app = mcp.sse_app()
-        else:
-            raise RuntimeError("当前 FastMCP 版本不支持 SSE 模式构建")
-        mcp.run()
+      else:
+        raise RuntimeError("当前 FastMCP 版本不支持 SSE 模式构建")
+
+      sys.stderr.write("🚀 正在启动 FastMCP HTTP (SSE) 服务: 127.0.0.1:8001\n")
+      uvicorn.run(app, host="127.0.0.1", port=8001)
+    else:
+      # 👈 核心：必须保留 else 分支，这才是 stdio 模式的主运行入口！
+      sys.stderr.write("🔌 正在启动 FastMCP stdio 服务通道...\n")
+      mcp.run()
 
 
 if __name__ == "__main__":
-    main()
+  main()
