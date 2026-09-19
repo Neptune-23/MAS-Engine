@@ -1,7 +1,5 @@
 from abc import ABC, abstractmethod
-import json
 from pathlib import Path
-import re
 from typing import Any, Dict, List, Tuple
 
 
@@ -9,19 +7,16 @@ class BaseLanguageAdapter(ABC):
   """专职语言适配器抽象基类"""
 
   @property
-  @abstractmethod
   def name(self) -> str:
-    pass
+    return "base"
 
   @property
-  @abstractmethod
   def file_extensions(self) -> List[str]:
-    pass
+    return []
 
   @property
-  @abstractmethod
   def default_entry_file(self) -> str:
-    pass
+    return "main.py"
 
   @abstractmethod
   def match_project(self, project_path: Path) -> bool:

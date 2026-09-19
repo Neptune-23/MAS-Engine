@@ -22,16 +22,15 @@ _ROOT_DIR = _CURRENT_DIR.parent
 if str(_ROOT_DIR) not in sys.path:
   sys.path.insert(0, str(_ROOT_DIR))
 
-from memory import retrieve_memory
-from web_server import sync_broadcast
-
 import json
 import time
 
 # from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from memory import retrieve_memory
 from state_machine import AgentState, TaskStateMachine
+from web_server import sync_broadcast
 
 from adapters import detect_adapter, get_adapter
 from config.settings import DB_CONFIG

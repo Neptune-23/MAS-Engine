@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 import re
 from pathlib import Path
@@ -135,7 +136,7 @@ class PythonAdapter(BaseLanguageAdapter):
         }
 
     def clean_format_code(self, raw_resp: str) -> str:
-      """清洗大模型输出，优先解开 JSON 信封并剥离 Markdown 代码块"""
+      """清洗大模型输出，解开 JSON 信封、Markdown 代码块并修复关键词粘连"""
       if not raw_resp or not isinstance(raw_resp, str):
         return ""
 
@@ -178,5 +179,11 @@ class PythonAdapter(BaseLanguageAdapter):
       inner_match = re.search(r"```(?:[a-zA-Z0-9_\+\-]+)?\n([\s\S]*?)```", text)
       if inner_match:
         text = inner_match.group(1).strip()
+
+      # 5. 关键词粘连修复 (恢复原有的 defcalculate -> def calculate)
+      text = re.sub(r"\bdef([a-zA-Z_])", r"def \1", text)
+      text = re.sub(r"\breturn([a-zA-Z0-9_])", r"return \1", text)
+      text = re.sub(r"\bimport([a-zA-Z_])", r"import \1", text)
+      text = re.sub(r"\bfrom([a-zA-Z_])", r"from \1", text)
 
       return text
