@@ -23,6 +23,8 @@ from state_machine import AgentState, TaskStateMachine
 
 from adapters import detect_adapter, get_adapter
 from config.settings import DB_CONFIG
+from kernel.chunk import ActionChunk, ActionPrimitive, ActionType, ChunkStatus
+from kernel.runner import ActionChunkRunner
 from tools.analysis_tools import (
     analyze_project_structure_impl,
     get_code_slice_impl,
@@ -218,6 +220,7 @@ def main():
             get_adapter(args.lang) if getattr(args, "lang", None) else detect_adapter(target_dir)
         )
         sys.stderr.write(f"🔌 [Adapter] 已成功装配专职语言适配器: [{adapter.name.upper()}]\n")
+        chunk_runner = ActionChunkRunner(default_adapter=adapter)
         task_id = f"standalone_{int(time.time())}"
         sys.stderr.write(f"📋 任务描述: {task_description}\n")
         sys.stderr.write(f"🆔 任务 ID: {task_id}\n")
@@ -393,23 +396,18 @@ def main():
                 continue
 
             # ------------------------------------------------------------
-            # 阶段 1: CODE_CONSTRUCTION (Developer 逐文件生成)
+            # 阶段 1: CODE_CONSTRUCTION (Developer 动作块批处理构建)
             # ------------------------------------------------------------
             elif current_state == AgentState.CODE_CONSTRUCTION and context.get("is_create_mode"):
                 current_role = "developer"
                 context["current_role"] = current_role
                 planned_files = context.get("planned_files", [adapter.default_entry_file])
-                sys.stderr.write(f"💻 [Developer] 正在逐个构建 {len(planned_files)} 个源文件...\n")
+                sys.stderr.write(f"💻 [Developer] 正在通过 Action Chunk 构建 {len(planned_files)} 个源文件...\n")
 
+                primitives = []
                 for rel_file in planned_files:
-                    file_full_path = os.path.join(project_path, rel_file)
-                    os.makedirs(os.path.dirname(file_full_path), exist_ok=True)
-
                     dev_system = f"你是一个精通 {adapter.name.upper()} 的高级开发工程师 Developer。请直接输出目标文件的完整源码，放在 ``` 代码块中。"
-                    dev_prompt = f"""需求: {context.get("description", "")}
-正在编写文件: {rel_file}
-{custom_rules}
-请给出该文件的完整、高质量、可运行代码。"""
+                    dev_prompt = f"需求: {context.get('description', '')}\n正在编写文件: {rel_file}\n{custom_rules}\n请给出该文件的完整可运行代码。"
 
                     dev_resp = llm_provider.generate_response(
                         system_prompt=dev_system,
@@ -417,17 +415,35 @@ def main():
                         temperature=0.1,
                         current_state=AgentState.CODE_CONSTRUCTION,
                     )
-
-                    # 由适配器统一处理代码清洗与格式规范
                     file_code = adapter.clean_format_code(dev_resp)
 
-                    with open(file_full_path, "w", encoding="utf-8") as f:
-                        f.write(file_code)
-                    sys.stderr.write(f"  ✅ [Developer] 已成功生成并写入: {rel_file}\n")
+                    primitives.append(
+                        ActionPrimitive(
+                            action_type=ActionType.WRITE_FILE,
+                            target_file=rel_file,
+                            payload={"content": file_code},
+                            description=f"写入源文件: {rel_file}",
+                        )
+                    )
 
-                sys.stderr.write("🔄 状态机推进: CODE_CONSTRUCTION ──> WEB_TESTING (静态验证)\n")
-                state_machine.update_task_state(task_id, AgentState.WEB_TESTING, context)
-                continue
+                # 使用动作块执行器一次性链式写入与语法预检
+                construction_chunk = ActionChunk(
+                    chunk_id=f"chk_construct_{int(time.time())}",
+                    intent="批量创建初始文件",
+                    primitives=primitives,
+                )
+                chunk_res = chunk_runner.execute(construction_chunk, Path(project_path))
+
+                if chunk_res.status == ChunkStatus.COMPLETED:
+                    sys.stderr.write(f"  ✅ [Developer] 动作块批处理成功完成，生成文件数: {chunk_res.executed_count}\n")
+                    sync_broadcast("ACTION_LOG", {"action": "动作块批处理成功", "detail": f"完成 {chunk_res.executed_count} 个文件的原子落盘"})
+                    state_machine.update_task_state(task_id, AgentState.WEB_TESTING, context)
+                    continue
+                else:
+                    sys.stderr.write(f"  ❌ [Developer] 动作块门禁触发中断: {chunk_res.halt_reason}\n")
+                    context["last_error"] = chunk_res.halt_reason
+                    state_machine.update_task_state(task_id, AgentState.SELF_HEALING, context)
+                    continue
 
             # ------------------------------------------------------------
             # 阶段 2: WEB_TESTING (适配器驱动的测试执行与语法门禁)
@@ -493,7 +509,7 @@ def main():
                     continue
 
             # ------------------------------------------------------------
-            # 阶段 3: SELF_HEALING (适配器驱动的自愈与语法门禁拦截)
+            # 阶段 3: SELF_HEALING (动作块驱动的原子自愈)
             # ------------------------------------------------------------
             elif current_state == AgentState.SELF_HEALING:
                 current_role = "fixer"
@@ -521,27 +537,35 @@ def main():
                     temperature=0.1,
                     current_state=AgentState.SELF_HEALING,
                 )
-
-                # 适配器自动代码后处理（修复 BPE 乱码、补齐标签）
                 fixed_code = adapter.clean_format_code(fixer_resp)
 
-                # 适配器静态语法门禁检验
-                syntax_ok, syntax_err = adapter.validate_syntax(target_rel_file, fixed_code)
-                if not syntax_ok:
-                    sys.stderr.write(f"⚠️ AST 语法门禁拦截无效修复: {syntax_err}\n")
-                    continue
-
-                with open(source_file_path, "w", encoding="utf-8") as f:
-                    f.write(fixed_code)
-                sys.stderr.write(f"✅ 修复补丁已成功应用至: {source_file_path}\n")
-                sys.stderr.write("🔄 状态机推进: SELF_HEALING ──> WEB_TESTING (回归测试)\n")
-                state_machine.update_task_state(task_id, AgentState.WEB_TESTING, context)
-                # 推送左右分栏代码 Diff 到 Web 界面
-                sync_broadcast(
-                    "DIFF_PREVIEW",
-                    {"file": target_rel_file, "old_code": source_content, "new_code": fixed_code},
+                # 构建自愈动作块 (原子写入 + 语法门禁校验)
+                healing_chunk = ActionChunk(
+                    chunk_id=f"chk_heal_{int(time.time())}",
+                    intent=f"修复 {target_rel_file} 缺陷",
+                    primitives=[
+                        ActionPrimitive(
+                            action_type=ActionType.WRITE_FILE,
+                            target_file=target_rel_file,
+                            payload={"content": fixed_code},
+                            description=f"应用修复补丁至 {target_rel_file}",
+                        )
+                    ],
                 )
-                continue
+                heal_res = chunk_runner.execute(healing_chunk, Path(project_path))
+
+                if heal_res.status == ChunkStatus.COMPLETED:
+                    sys.stderr.write(f"✅ 修复动作块成功应用至: {source_file_path}\n")
+                    sync_broadcast(
+                        "DIFF_PREVIEW",
+                        {"file": target_rel_file, "old_code": source_content, "new_code": fixed_code},
+                    )
+                    sys.stderr.write("🔄 状态机推进: SELF_HEALING ──> WEB_TESTING (回归测试)\n")
+                    state_machine.update_task_state(task_id, AgentState.WEB_TESTING, context)
+                    continue
+                else:
+                    sys.stderr.write(f"⚠️ 动作块物理门禁拦截无效修复: {heal_res.halt_reason}\n")
+                    continue
 
             # ------------------------------------------------------------
             # 阶段 4: DELIVERY_COMPLETED (成功完成交付)
