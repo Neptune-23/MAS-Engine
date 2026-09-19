@@ -2,6 +2,47 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
+import json
+import re
+
+class BaseAdapter:
+    # ...
+    def clean_format_code(self, raw_resp: str) -> str:
+        if not raw_resp or not isinstance(raw_resp, str):
+            return ""
+        
+        text = raw_resp.strip()
+
+        # 1. 优先尝试解析 JSON 信封（处理 {"fixed_content": "...", ...}）
+        try:
+            # 去除外部可能包裹的 ```json ... ```
+            json_candidate = text
+            if json_candidate.startswith("```json"):
+                json_candidate = json_candidate[7:]
+            elif json_candidate.startswith("```"):
+                json_candidate = json_candidate[3:]
+            if json_candidate.endswith("```"):
+                json_candidate = json_candidate[:-3]
+            json_candidate = json_candidate.strip()
+
+            if json_candidate.startswith("{") and json_candidate.endswith("}"):
+                data = json.loads(json_candidate)
+                if isinstance(data, dict):
+                    for key in ["fixed_content", "code", "content", "source", "fixed_code"]:
+                        if key in data and isinstance(data[key], str):
+                            text = data[key].strip()
+                            break
+        except Exception:
+            pass
+
+        # 2. 提取 Markdown 代码块（如 ```python ... ```）
+        code_block_match = re.search(r"```(?:[a-zA-Z0-9_\+\-]+)?\n([\s\S]*?)```", text)
+        if code_block_match:
+            return code_block_match.group(1).strip()
+
+        # 3. 若无标记则返回净化后的纯文本
+        return text
+
 
 class BaseLanguageAdapter(ABC):
     """所有语言适配器的统一抽象契约 (SPI)"""
@@ -59,3 +100,5 @@ class BaseLanguageAdapter(ABC):
     def clean_format_code(self, raw_code: str) -> str:
         """语言特定的代码后处理（修复粘连、补齐标签等）"""
         pass
+
+BaseAdapter = BaseLanguageAdapter

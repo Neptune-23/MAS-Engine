@@ -5,21 +5,50 @@ from utils.security import validate_path
 
 
 @validate_path
-def edit_file(file_path: str, replace_pattern: str, replace_with: str) -> str:
-    """
-    通用文件编辑工具：在文件中查找并替换字符串。
-    不依赖任何语言，纯文本操作。
-    """
-    try:
-        if not os.path.exists(file_path):
-            return json.dumps({"success": False, "error": f"文件不存在: {file_path}"})
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        if replace_pattern not in content:
-            return json.dumps({"success": False, "error": f"未找到替换模式: {replace_pattern}"})
-        new_content = content.replace(replace_pattern, replace_with)
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(new_content)
-        return json.dumps({"success": True, "message": "文件编辑成功"})
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)})
+def edit_file(
+    file_path: str = None,
+    target_file: str = None,
+    old_string: str = None,
+    new_string: str = None,
+    replace_pattern: str = None,
+    replace_with: str = None,
+    **kwargs,
+) -> dict:
+  """编辑文件内容：兼容支持 old_string/new_string 与 replace_pattern/replace_with 两套入参"""
+  # 兼容文件路径入参
+  path_to_edit = file_path or target_file
+  if not path_to_edit:
+    return {"success": False, "error": "缺少目标文件路径 (file_path/target_file)"}
+
+  # 兼容查找/替换内容入参
+  find_str = old_string if old_string is not None else replace_pattern
+  repl_str = new_string if new_string is not None else replace_with
+
+  if find_str is None or repl_str is None:
+    return {
+        "success": False,
+        "error": (
+            "缺少替换参数，需提供 old_string/new_string 或"
+            " replace_pattern/replace_with"
+        ),
+    }
+
+  from pathlib import Path
+
+  target = Path(path_to_edit)
+  if not target.exists():
+    return {"success": False, "error": f"文件不存在: {path_to_edit}"}
+
+  try:
+    content = target.read_text(encoding="utf-8")
+    if find_str not in content:
+      return {
+          "success": False,
+          "error": f"在 {path_to_edit} 中未找到指定的待替换文本",
+      }
+
+    new_content = content.replace(find_str, repl_str, 1)
+    target.write_text(new_content, encoding="utf-8")
+    return {"success": True, "message": f"成功更新 {path_to_edit}"}
+  except Exception as e:
+    return {"success": False, "error": f"文件编辑失败: {str(e)}"}

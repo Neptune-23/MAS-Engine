@@ -6,6 +6,19 @@ from typing import Any, Dict, List, Set, Tuple
 
 from adapters.base import BaseLanguageAdapter
 
+class PythonAdapter(BaseLanguageAdapter):
+    def validate_syntax(self, code: str) -> bool:
+        if not code or not code.strip():
+            return False
+        try:
+            tree = ast.parse(code)
+            # 防御：如果 AST 仅包含单个字典表达式（即泄露的未解析 JSON），直接拒绝
+            if len(tree.body) == 1 and isinstance(tree.body[0], ast.Expr):
+                if isinstance(tree.body[0].value, ast.Dict):
+                    return False
+            return True
+        except SyntaxError:
+            return False
 
 class PythonAdapter(BaseLanguageAdapter):
     """Python 语言插拔式适配器"""

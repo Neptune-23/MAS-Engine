@@ -156,11 +156,26 @@ class TaskStateMachine:
 
     def get_task_state(self, task_id: str):
         _log(f"get_task_state 被调用: task_id={task_id}")
+        # 无数据库降级时，直接使用纯内存存储，永不因 TTL 淘汰
+        if not self._db_available:
+            cached = self._cache.get(task_id)
+            if cached:
+                _log(f"从纯内存缓存返回: state={cached['state']}")
+                return {
+                    "current_state": cached["state"],
+                    "context": cached.get("context", {}),
+                }
+            return None
+
+        # 有数据库时，按正常 TTL 机制（缓存过期则回查 DB）
         if task_id in self._cache:
             cached = self._cache[task_id]
             if time.time() - cached["timestamp"] < self._cache_ttl:
                 _log(f"从缓存返回: state={cached['state']}")
-                return {"current_state": cached["state"], "context": cached.get("context", {})}
+                return {
+                    "current_state": cached["state"],
+                    "context": cached.get("context", {}),
+                }
             else:
                 del self._cache[task_id]
 

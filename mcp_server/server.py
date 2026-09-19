@@ -7,6 +7,21 @@ if str(root_dir) not in sys.path:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import os
+from pathlib import Path
+import sys
+
+# ============================================================
+# 确保当前目录 (mcp_server) 和项目根目录均在 sys.path 中
+# 使得独立脚本运行与 mas-engine 控制台命令均能正确解析同级模块
+# ============================================================
+_CURRENT_DIR = Path(__file__).resolve().parent
+if str(_CURRENT_DIR) not in sys.path:
+  sys.path.insert(0, str(_CURRENT_DIR))
+_ROOT_DIR = _CURRENT_DIR.parent
+if str(_ROOT_DIR) not in sys.path:
+  sys.path.insert(0, str(_ROOT_DIR))
+  
 from memory import retrieve_memory
 from web_server import sync_broadcast
 
@@ -999,36 +1014,31 @@ def main():
 
         # 循环结束
         if iteration >= max_iterations:
-            sys.stderr.write(f"⚠️ 达到最大迭代次数 ({max_iterations})，任务失败。\n")
-
             # ===== 检查最后一次测试结果，决定是成功还是失败 =====
             last_test_report = context.get("test_report", {})
             if last_test_report.get("status") == "pass":
-                sys.stderr.write("✅ 最后一次测试已通过，视为成功交付\n")
-                state_machine.update_task_state(task_id, AgentState.DELIVERY_COMPLETED, context)
+                sys.stderr.write(
+                    f"✅ 任务 [{task_id}] 最后一轮测试通过，视为成功交付！\n"
+                )
+                state_machine.update_task_state(
+                    task_id, AgentState.DELIVERY_COMPLETED, context
+                )
             else:
-                sys.stderr.write("❌ 最后一次测试未通过，任务失败\n")
-                failure_reason = f"达到最大迭代次数 ({max_iterations})，测试未通过"
+                sys.stderr.write(
+                    f"⚠️ 达到最大迭代次数 ({max_iterations})，测试未通过，转交人工介入。\n"
+                )
+                failure_reason = (
+                    f"达到最大迭代次数 ({max_iterations})，测试未通过。"
+                )
                 last_build = context.get("last_build_result", {})
                 if last_build.get("success") is False:
-                    failure_reason += (
-                        f"\n最后一次构建错误摘要：{last_build.get('stderr', '')[:500]}"
-                    )
+                    failure_reason += f"\n最后一次构建错误摘要：{last_build.get('stderr', '')[:500]}"
                 context["failure_reason"] = failure_reason
                 state_machine.update_task_state(
-                    task_id, AgentState.HUMAN_INTERRUPT, {**context, "reason": failure_reason}
+                    task_id,
+                    AgentState.HUMAN_INTERRUPT,
+                    {**context, "reason": failure_reason},
                 )
-
-            # 将失败原因写入上下文，方便后续输出
-            failure_reason = f"任务因达到最大迭代次数 ({max_iterations}) 而终止，构建仍未成功。"
-            # 附加最后一次构建的错误摘要
-            last_build = context.get("last_build_result", {})
-            if last_build.get("success") is False:
-                failure_reason += f"\n最后一次构建错误摘要：{last_build.get('stderr', '')[:500]}"
-            context["failure_reason"] = failure_reason
-            state_machine.update_task_state(
-                task_id, AgentState.HUMAN_INTERRUPT, {**context, "reason": failure_reason}
-            )
         # ===== 生成任务报告 =====
         report_lines = []
         report_lines.append("\n" + "=" * 50)
@@ -1111,12 +1121,12 @@ def main():
         import uvicorn
 
         app = mcp.sse_app()
-        if hasattr(app, "routes"):
-            for route in app.routes:
-                sys.stderr.write(f"路由: {route.path}\n")
-        uvicorn.run(app, host="0.0.0.0", port=8000)
-    else:
-        logger.info("启动 MCP 服务在 stdio 模式")
+        if hasattr(mcp, "http_app"):
+            app = mcp.http_app(transport="sse")
+        elif hasattr(mcp, "sse_app"):
+            app = mcp.sse_app()
+        else:
+            raise RuntimeError("当前 FastMCP 版本不支持 SSE 模式构建")
         mcp.run()
 
 

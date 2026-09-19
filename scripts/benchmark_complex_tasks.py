@@ -14,7 +14,8 @@ sys.path.insert(0, str(root_dir / "mcp-server"))
 from llm_provider import LocalLLMProvider
 from memory import TaskReflexionBuffer
 
-from tools.fix_tools import validate_code_syntax
+from adapters.python_adapter import PythonAdapter
+validate_code_syntax = lambda code: PythonAdapter().validate_syntax(code)
 
 COMPLEX_BENCHMARK_CASES = [
     {

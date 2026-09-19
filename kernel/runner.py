@@ -60,6 +60,11 @@ class ActionChunkRunner:
                 with open(target, "w", encoding="utf-8") as f:
                     f.write(content)
                 return {"success": True, "written_bytes": len(content.encode("utf-8"))}
+            target = (sandbox_path / primitive.target_file).resolve()
+            sandbox_resolved = sandbox_path.resolve()
+
+            if not str(target).startswith(str(sandbox_resolved)):
+                return False, f"安全拦截：目标路径 {primitive.target_file} 超出工作区沙箱边界"
 
             elif primitive.action_type == ActionType.READ_SLICE:
                 target = sandbox_path / primitive.target_file
@@ -79,6 +84,17 @@ class ActionChunkRunner:
                     "stdout": res.stdout[:500],
                     "stderr": res.stderr[:500],
                 }
+
+            # 补齐 VALIDATE_SYNTAX 原语分支
+            elif primitive.action_type == ActionType.VALIDATE_SYNTAX:
+                code = primitive.content or ""
+                target_file_path = (sandbox_path / primitive.target_file).resolve()
+                if not code and target_file_path.exists():
+                    code = target_file_path.read_text(encoding="utf-8", errors="ignore")
+                
+                is_valid = self.adapter.validate_syntax(code)
+                msg = "语法合法性校验通过" if is_valid else "语法校验未通过"
+                return is_valid, msg
 
             return {"success": False, "error": f"未知动作原语: {primitive.action_type}"}
 
