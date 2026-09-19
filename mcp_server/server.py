@@ -25,8 +25,6 @@ if str(_ROOT_DIR) not in sys.path:
 from memory import retrieve_memory
 from web_server import sync_broadcast
 
-sys.stdout = sys.stderr
-
 import json
 import time
 
@@ -165,7 +163,6 @@ def main():
 
     # ===== 强制 stdout 重定向（仅纯 MCP 协议 stdio 模式） =====
     if not args.standalone and not args.http:
-        sys.stdout = sys.stderr
         sys.stderr.write("[MCP] stdout redirected to stderr for MCP protocol\n")
 
     # ===== 独立运行模式 / 快捷模式 =====

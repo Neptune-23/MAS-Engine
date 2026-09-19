@@ -156,12 +156,13 @@ def run_benchmark():
     print("=" * 60 + "\n")
 
     try:
-        provider = LocalLLMProvider(
-            base_url="http://127.0.0.1:8000/v1", model_name="mas-fixer-specialist"
-        )
+      provider = LocalLLMProvider(
+          base_url="http://127.0.0.1:8000/v1",
+          default_model="mas-fixer-specialist",
+      )
     except Exception as e:
-        print(f"❌ 无法连接本地推理服务: {e}")
-        sys.exit(1)
+      print(f"❌ 无法连接本地推理服务: {e}")
+      sys.exit(1)
 
     results = []
 

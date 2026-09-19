@@ -134,16 +134,49 @@ class PythonAdapter(BaseLanguageAdapter):
             "token_saving_percent": f"{token_saving}%",
         }
 
-    def clean_format_code(self, raw_code: str) -> str:
-        code = raw_code.replace("Ġ", " ").replace("Ċ", "\n").replace("ĉ", "\t").strip()
-        code_match = re.search(r"```(?:python)?\s*(.*?)\s*```", code, re.DOTALL)
-        if code_match:
-            code = code_match.group(1).strip()
+    def clean_format_code(self, raw_resp: str) -> str:
+      """清洗大模型输出，优先解开 JSON 信封并剥离 Markdown 代码块"""
+      if not raw_resp or not isinstance(raw_resp, str):
+        return ""
 
-        # 自动修复 Python 关键字粘连与缩进
-        code = re.sub(r"\bdef([a-zA-Z_])", r"def \1", code)
-        code = re.sub(r"\breturn([a-zA-Z0-9_\(\*\-\s])", r"return \1", code)
-        code = re.sub(r"\bimport([a-zA-Z_])", r"import \1", code)
-        code = re.sub(r"\bfrom([a-zA-Z_])", r"from \1", code)
-        code = re.sub(r":\s*return\b", r":\n    return", code)
-        return code
+      text = raw_resp.strip()
+
+      # 辅助函数：如果是 JSON 字典，提取其中的代码字段
+      def _extract_from_json(s: str) -> str:
+        s_clean = s.strip().strip("`").strip()
+        if s_clean.startswith("{") and s_clean.endswith("}"):
+          try:
+            data = json.loads(s_clean)
+            if isinstance(data, dict):
+              for k in [
+                  "fixed_content",
+                  "code",
+                  "content",
+                  "source",
+                  "fixed_code",
+              ]:
+                if k in data and isinstance(data[k], str):
+                  return data[k].strip()
+          except Exception:
+            pass
+        return s
+
+      # 1. 尝试直接从整体 JSON 解析
+      text = _extract_from_json(text)
+
+      # 2. 提取 Markdown 代码块
+      code_block_match = re.search(
+          r"```(?:[a-zA-Z0-9_\+\-]+)?\n([\s\S]*?)```", text
+      )
+      if code_block_match:
+        text = code_block_match.group(1).strip()
+
+      # 3. 如果代码块内部依然包含 JSON，再次尝试提取
+      text = _extract_from_json(text)
+
+      # 4. 提取后如果内部还有嵌套代码块，再剥离一次
+      inner_match = re.search(r"```(?:[a-zA-Z0-9_\+\-]+)?\n([\s\S]*?)```", text)
+      if inner_match:
+        text = inner_match.group(1).strip()
+
+      return text
